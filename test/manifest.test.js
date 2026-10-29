@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { INTERVAL_MAX_MIN, INTERVAL_MIN_MIN, USER_AGENT, VERSION } from '../src/constants.js';
-import { buildDevice } from '../src/devices.js';
+import { buildDevice, validId } from '../src/devices.js';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const manifest = JSON.parse(read('gladys-assistant-integration.json'));
@@ -240,4 +240,15 @@ test('the code never feeds the energy endpoints nor scene events', () => {
     assert.doesNotMatch(read(file), /publishEnergyConsumption\(/, file);
     assert.doesNotMatch(read(file), /publishSceneEvent\(/, file);
   }
+});
+
+test('external ids: never a dot, a colon nor a slash, whatever /data says', () => {
+  for (const bad of ['a.b', 'a:b', '../x', 'a/b', 'A', '-a', 'a-', 'a--b', '', 'a'.repeat(49)]) {
+    assert.equal(validId('ca', bad), false, bad);
+  }
+  assert.equal(validId('ca', 'lacolle-route-223'), true);
+  for (const bad of ['09010', '0901011', '09.101', '09:101', 'l01901']) {
+    assert.equal(validId('us', bad), false, bad);
+  }
+  assert.equal(validId('us', 'L01901'), true);
 });

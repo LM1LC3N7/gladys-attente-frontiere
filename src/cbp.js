@@ -11,14 +11,20 @@
 //
 // The zone abbreviation of `update_time` is typed by hand at the port and is
 // sometimes wrong (an "EST" in October at a port on EDT): it is never used.
-// The time of a lane is read as the local time of its port, on the date of
-// the port, the day before when it is later than the time of the port; its
-// age is the difference of the two local times. The age of the feed itself
-// is checked by the app (src/app.js: a feed whose time no longer moves).
+// `parseCbp` keeps the local times as they are; `resolvePort` turns them into
+// UTC instants with the zone of the port (src/zones.js): the feed time is the
+// instant closest to the server `Date`, a lane time the latest instant of its
+// local time (on the date of the port or the day before) not after the feed.
+// A local time repeated in November (two instants an hour apart) takes the
+// earlier one, unless the earlier is not after the reading already published
+// for that lane: a stale reading is never taken for a fresh one, a new one is
+// never taken for an old one. The age of the feed itself is checked by the
+// app (src/app.js: a feed whose time no longer moves).
 // -----------------------------------------------------------------------------
 
-import { CBP_ROLLOVER_SLACK, DAY, MAX_ROWS, MAX_WAIT_MINUTES } from './constants.js';
+import { CBP_ROLLOVER_SLACK, DAY, HOUR, MAX_ROWS, MAX_WAIT_MINUTES } from './constants.js';
 import { FormatError } from './cbsa.js';
+import { inferZones, instantsOf, localNaive, zoneOfPort } from './zones.js';
 
 /** The lanes kept, by feature key: [group, lane]. */
 export const CBP_LANES = {
@@ -77,9 +83,10 @@ export function parseUpdateTime(text) {
 /**
  * One lane.
  * @returns {{ kind: 'wait', minutes: number } | { kind: 'closed' | 'pending' | 'na' | 'none' |
- *   'unreadable' }} plus `stamp` (naive local ms), `age` (ms) and `updated` (text) when dated.
+ *   'unreadable' }} plus `clock` (minutes since local midnight) and `updated` (text) when
+ *   dated (resolvePort turns them into instants).
  */
-export function parseLane(lane, portTime) {
+export function parseLane(lane) {
   if (!lane || typeof lane !== 'object') return { kind: 'none' };
   const status = clean(lane.operational_status, 40).toLowerCase();
   let reading;
@@ -102,15 +109,59 @@ export function parseLane(lane, portTime) {
     reading = { kind: 'unreadable' };
   }
   const update = parseUpdateTime(lane.update_time);
-  if (update && portTime !== undefined) {
-    const midnight = portTime - (portTime % DAY);
-    let stamp = midnight + update.minutes * 60_000;
-    if (stamp > portTime + CBP_ROLLOVER_SLACK) stamp -= DAY;
-    reading.stamp = stamp;
-    reading.age = Math.max(0, portTime - stamp);
+  if (update) {
+    reading.clock = update.minutes;
     reading.updated = update.text;
   }
   return reading;
+}
+
+/**
+ * The UTC instants of one port: `feedUtc`, and per lane `stamp` (UTC ms),
+ * `age` (ms, at the feed time) and `naive` (its local time, for display).
+ * @param {object} port a port of parseCbp
+ * @param {number} ref the server `Date` (or our clock)
+ * @param {(key: string) => number | undefined} last the UTC stamp last published for a lane
+ */
+export function resolvePort(port, ref, last = () => undefined) {
+  const known = zoneOfPort(port.id);
+  const zones = known ? [known] : inferZones(port.portTime, ref);
+  const zone = zones[0];
+  const lanes = {};
+  let feedUtc;
+  if (zone && port.portTime !== undefined) {
+    const feeds = zones.flatMap((z) => instantsOf(z, port.portTime));
+    feedUtc = feeds.sort((a, b) => Math.abs(a - ref) - Math.abs(b - ref))[0];
+  }
+  for (const [key, lane] of Object.entries(port.lanes)) {
+    const { clock, ...reading } = lane;
+    lanes[key] = reading;
+    if (clock === undefined || feedUtc === undefined) continue;
+    const midnight = port.portTime - (port.portTime % DAY) + clock * 60_000;
+    const instants = [
+      ...new Set(
+        zones.flatMap((z) => [...instantsOf(z, midnight), ...instantsOf(z, midnight - DAY)]),
+      ),
+    ]
+      .filter((t) => t <= feedUtc + CBP_ROLLOVER_SLACK)
+      .sort((a, b) => a - b);
+    if (instants.length === 0) continue;
+    const latest = instants[instants.length - 1];
+    // The candidates of the latest day: one, or two an hour apart (November).
+    const group = instants.filter((t) => t > latest - 2 * HOUR);
+    const published = last(key);
+    let stamp;
+    if (published !== undefined && group.includes(published)) {
+      stamp = published;
+    } else {
+      const newer = group.filter((t) => published === undefined || t > published);
+      stamp = newer.length > 0 ? newer[0] : latest;
+    }
+    reading.stamp = stamp;
+    reading.age = Math.max(0, feedUtc - stamp);
+    reading.naive = localNaive(zone, stamp);
+  }
+  return { ...port, zone: known ?? (zones.length === 1 ? zone : undefined), zones, feedUtc, lanes };
 }
 
 /**
@@ -154,10 +205,7 @@ export function parseCbp(text) {
     const lanes = {};
     for (const [key, [group, lane]] of Object.entries(CBP_LANES)) {
       const groupOf = port[group];
-      lanes[key] = parseLane(
-        groupOf && typeof groupOf === 'object' ? groupOf[lane] : undefined,
-        portTime,
-      );
+      lanes[key] = parseLane(groupOf && typeof groupOf === 'object' ? groupOf[lane] : undefined);
     }
     ports.push({
       id,

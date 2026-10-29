@@ -177,3 +177,8 @@ test('a declared length above the cap is refused before any byte is read', async
   await rejectsWith(get(url, { timeout: 3000 }), 'too_large');
   assert.ok(performance.now() - started < 1000);
 });
+
+test('Retry-After: more than 7 digits of seconds is not a delay', () => {
+  assert.equal(parseRetryAfter('1234567'), 1_234_567_000);
+  assert.equal(parseRetryAfter('12345678'), undefined);
+});

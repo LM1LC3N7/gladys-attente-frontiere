@@ -21,6 +21,10 @@ the notes of the version's GitHub Release.
   not applicable or missing values never published as numbers. One read every
   10 to 60 minutes (kept across restarts), one request at a time, bounded,
   conditional headers for the CBSA, 429/5xx pause per source, frozen CBP feed
-  detected. Read-only.
+  detected. Read-only. CBP local times turned into UTC with the zone of each
+  port (exact across the changes of time). One publication at a time, each
+  reading marked before it is sent (never twice, 250 states a minute at
+  most, fair rotation beyond); a device created gets its fresh readings at
+  once.
 
 [Unreleased]: https://github.com/LM1LC3N7/gladys-attente-frontiere/commits/main

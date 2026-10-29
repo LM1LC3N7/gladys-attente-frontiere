@@ -46,8 +46,10 @@ officielles.
 
 Une voie que le passage n'a pas ne reçoit simplement jamais de valeur.
 
-- « No Delay » (ASFC) et « no delay » (CBP) valent **0 minute** : c'est une
-  attente nulle annoncée par l'agence.
+- « No Delay » (ASFC) vaut **0 minute** : c'est une attente nulle annoncée
+  par l'agence. Au CBP, le nombre de minutes donné est publié tel quel, que
+  la voie soit marquée « delay » ou « no delay » (le flux réel donne
+  « no delay » avec 0, 1 ou 5 minutes).
 - « Closed », « Not Applicable », « -- », « Lanes Closed », « Update Pending »,
   « N/A » ou un texte inconnu ne sont **jamais publiés comme un nombre** : la
   fonction **État** le dit (« Fermé », « Voies fermées », « Mise à jour en
@@ -68,8 +70,18 @@ Une voie que le passage n'a pas ne reçoit simplement jamais de valeur.
   plus de 2 heures, plus rien n'en est publié et l'état devient « Source muette
   depuis plus de 2 h : rien publié ».
 - Le CBP saisit le fuseau à la main (on y voit « EST » en octobre) : il n'est
-  pas utilisé, l'heure est lue comme l'heure locale du poste, la veille si elle
-  est plus tard que l'heure du poste.
+  pas utilisé. Chaque poste a son fuseau (d'après son district du CBP : Est,
+  Centre, Rocheuses, Pacifique, Alaska ; un district inconnu prend le fuseau
+  dont le décalage correspond à l'heure du flux comparée à l'en-tête `Date`) :
+  les heures locales deviennent des instants exacts, changements d'heure
+  compris, la veille si elles sont plus tard que l'heure du poste.
+- **Changement d'heure** : en mars, un relevé d'avant le saut garde son âge
+  réel. En novembre, l'heure de 1 h à 2 h passe deux fois : une heure de
+  relevé dans cette plage, jamais vue avant, est prise comme la première des
+  deux (la plus ancienne) ; un relevé de plus de 2 heures n'est donc jamais
+  pris pour un frais, au prix, une fois par an, d'un relevé frais de cette
+  heure-là écarté. Une heure qui suit un relevé déjà publié pour la même voie
+  est prise comme la seconde : le nouveau relevé est publié.
 - Gladys garde la dernière valeur publiée d'une fonction : quand une attente
   n'est plus connue, c'est la fonction **État** qui le dit, pas la valeur.
 
@@ -81,11 +93,17 @@ premier relevé frais sous X.
 
 ## Rythme et sources
 
-- Une lecture toutes les N minutes (10 à 60), jamais plus souvent :
-  enregistrer le formulaire, une reconnexion, l'onglet Découverte, un appareil
-  créé ou un redémarrage ne relancent aucune lecture (l'heure de la dernière
-  tentative est écrite dans /data avant chaque lecture). Seule exception : un
-  redémarrage alors que /data n'a pu être lu ou écrit, qui lit aussitôt.
+- Une lecture toutes les N minutes (10 à 60), jamais plus souvent pour une
+  même source : enregistrer le formulaire, une reconnexion, l'onglet
+  Découverte, un appareil créé ou un redémarrage ne relancent aucune lecture
+  (l'heure de la dernière tentative est écrite dans /data avant chaque
+  lecture). Exceptions : un intervalle raccourci dans le formulaire rend la
+  lecture suivante due plus tôt (au plus tôt à la nouvelle durée après la
+  dernière) ; une lecture coupée par un enregistrement ou une reconnexion
+  reprend une minute plus tard, pour les seules sources qu'elle n'avait pas
+  encore demandées (une source demandée, même coupée, attend son intervalle) ; un redémarrage alors que /data n'a pu être lu ou écrit lit aussitôt.
+- Un appareil créé reçoit tout de suite les relevés frais déjà en mémoire
+  (sans lecture) ; renommer ou déplacer un appareil ne renvoie rien.
 - Une requête à la fois : l'ASFC en anglais, l'ASFC en français (seulement si
   la langue est le français, pour les noms), puis le CBP. Chaque requête est
   bornée à 20 secondes et en taille (256 Ko pour l'ASFC, 4 Mo pour le CBP).
@@ -94,20 +112,27 @@ premier relevé frais sous X.
 - User-Agent : `gladys-attente-frontiere/<version> (+adresse du dépôt)`.
 - Une réponse 429 ou 5xx met **cette source** en pause (5 minutes doublées à
   chaque échec, `Retry-After` respecté, entre 60 secondes et 6 heures), pause
-  gardée au redémarrage. L'autre source continue d'être lue.
+  gardée au redémarrage. L'autre source continue d'être lue. Le fichier
+  français de l'ASFC (même serveur) n'est pas demandé quand le fichier anglais
+  vient d'être refusé ou est en pause.
 - Les noms français de l'ASFC ne bloquent jamais rien : sans eux, les noms
   anglais sont utilisés.
 
 ## Statut de l'intégration
 
 « Connecté » dès qu'au moins une des deux sources a été lue à sa dernière
-tentative (le CBP ne compte que si son flux bouge encore) ; avant la première
-lecture, « En attente de la première lecture (dans N min) ». Le message dit pour chaque
+tentative (le CBP ne compte que si son flux bouge encore). Après un
+redémarrage, avant la lecture suivante : « connecté » si une source avait été
+lue avec succès dans l'intervalle (gardé dans /data), sinon « En attente de la
+première lecture (dans N min) » ; les états des appareils restent ceux déjà
+affichés. Le message dit pour chaque
 source ce qui ne va pas : injoignable, pas de réponse à temps, pause après un
 429 ou un 5xx, format inattendu, flux figé ; et aussi un intervalle remplacé
 (hors 10-60 minutes), un /data illisible (mis de côté sous un autre nom) ou non
 inscriptible, des valeurs reportées à la lecture suivante (Gladys accepte 300
-états par minute, le module en envoie 250 au plus).
+états par minute, le module en envoie 250 au plus sur une minute glissante ;
+au-delà, les valeurs reportées passent en tête la fois suivante, à tour de
+rôle).
 
 ## Données et licences
 

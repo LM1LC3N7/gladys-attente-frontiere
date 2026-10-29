@@ -25,6 +25,7 @@ import {
   text,
 } from './helpers/app.js';
 import { testClock } from './helpers/clock.js';
+import { localNaive } from '../src/zones.js';
 
 const INTERVAL = 15 * MINUTE;
 
@@ -204,7 +205,12 @@ test('restart: the attempt time is in /data before the request; never sooner tha
   const second = await setup({ store, clock, world });
   await second.begin();
   assert.equal(second.sources.count('cbsa'), 0);
-  assert.match(second.gladys.fake.connectionStatus.message.fr, /première lecture \(dans 10 min\)/);
+  // The last read was fine (kept in /data): shown connected, waiting for its pace.
+  assert.equal(second.gladys.fake.connectionStatus.connected, true);
+  assert.match(
+    second.gladys.fake.connectionStatus.message.fr,
+    /Dernière lecture réussie avant le redémarrage ; prochaine lecture dans 10 min/,
+  );
   await second.wait(10 * MINUTE - SECOND);
   assert.equal(second.sources.count('cbsa'), 0);
   await second.wait(2 * SECOND);
@@ -554,33 +560,41 @@ test('a reconnection sends the Discovery and the statuses again, never the waits
   assert.ok(gladys.fake.discoveredDevices.length > 0);
 });
 
-test('a device created after a reading gets its waits at the next read', async () => {
-  const { begin, gladys, wait, create, statesOf } = await live({ every: 2 * HOUR });
+test('a device created after a reading gets its waits at once, from memory (no read)', async () => {
+  const { begin, gladys, wait, create, statesOf, sources } = await live({ every: 2 * HOUR });
   await begin();
   await create('to-canada', 'peace-bridge');
   const fid = F('to-canada', 'peace-bridge', 'travellers');
-  assert.equal(statesOf(fid).length, 0, 'no read for a creation');
+  assert.equal(statesOf(fid).length, 1, 'published at the creation');
+  assert.equal(sources.count('cbsa'), 1, 'no read for a creation');
   await wait(INTERVAL);
-  assert.equal(statesOf(fid).length, 1);
+  assert.equal(statesOf(fid).length, 1, 'the same reading not again');
+  // Renamed (updated): Gladys keeps its values, nothing sent again.
+  const device = structuredClone(
+    gladys.devices.find((d) => d.external_id === D('to-canada', 'peace-bridge')),
+  );
+  device.name = 'Renamed';
+  await gladys.fake.deviceUpdated(device);
+  await wait(INTERVAL);
+  assert.equal(statesOf(fid).length, 1, 'not again after an update');
   // Deleted then created again: the same reading is sent again (Gladys lost it).
   await gladys.fake.deviceDeleted(
     gladys.devices.find((d) => d.external_id === D('to-canada', 'peace-bridge')),
   );
   await create('to-canada', 'peace-bridge');
-  await wait(INTERVAL);
   assert.equal(statesOf(fid).length, 2);
 });
 
 test('Gladys refusing the states: nothing marked, sent at the next read', async (t) => {
   const { begin, gladys, wait, create, statesOf } = await live({ every: HOUR });
   await begin();
-  await create('to-canada', 'peace-bridge');
   const original = gladys.publishStates.bind(gladys);
   let refuse = true;
   t.mock.method(gladys, 'publishStates', async (states) => {
     if (refuse) throw new Error('429');
     return original(states);
   });
+  await create('to-canada', 'peace-bridge');
   await wait(INTERVAL);
   const fid = F('to-canada', 'peace-bridge', 'travellers');
   assert.equal(statesOf(fid).length, 0);
@@ -821,9 +835,10 @@ test('more fresh values than the budget: 250 at most, the rest at the next read'
     );
   const { begin, create, app, gladys, wait } = await live({ clock, world });
   await begin();
-  for (const id of ports) await create('to-usa', id);
   const before = gladys.fake.states.length;
-  await app.publishValues(app.run);
+  // Each creation publishes from memory: all within the same minute, 250 at most.
+  for (const id of ports) await create('to-usa', id);
+  await app.publishValues();
   const first = gladys.fake.states.length - before;
   assert.equal(first, 250);
   await app.updateStatus();
@@ -905,4 +920,361 @@ test('a timer that fires early never brings a read sooner than the interval', as
   const at = sources.requests.filter((r) => r.key === 'cbsa').map((r) => r.at);
   assert.equal(at.length, 4);
   for (let i = 1; i < at.length; i += 1) assert.ok(at[i] - at[i - 1] >= INTERVAL, `${at}`);
+});
+
+// --- Review r1 -------------------------------------------------------------------------
+
+/** Waits states sent per feature: none twice. */
+const twice = (gladys) => {
+  const seen = new Map();
+  for (const st of gladys.fake.states) {
+    if (typeof st.state !== 'number') continue;
+    seen.set(st.device_feature_external_id, (seen.get(st.device_feature_external_id) ?? 0) + 1);
+  }
+  return [...seen.values()].filter((n) => n > 1).length;
+};
+
+/** 40 CBP ports x 5 lanes = 200 fresh values. */
+function bigWorld(clock) {
+  const world = liveWorld(clock, { every: 4 * HOUR });
+  const ports = Array.from({ length: 40 }, (_, i) => String(100000 + i));
+  world.cbp = () =>
+    ports.map((number) =>
+      cbpPort({
+        local: edt(clock.now()),
+        updated: edt(NOW),
+        number,
+        passenger: 1,
+        nexus: 2,
+        ready: 3,
+        commercial: 4,
+        fast: 5,
+      }),
+    );
+  return { world, ports };
+}
+
+/** publishStates held until released: the batches in flight are visible. */
+function slowGladys(t, gladys) {
+  const original = gladys.publishStates.bind(gladys);
+  const held = [];
+  const calls = [];
+  t.mock.method(gladys, 'publishStates', async (states) => {
+    calls.push(states);
+    await new Promise((resolve) => held.push(resolve));
+    return original(states);
+  });
+  const release = async (wait) => {
+    for (let i = 0; i < 50; i += 1) {
+      while (held.length) held.shift()();
+      await wait(0);
+    }
+  };
+  return { calls, release };
+}
+
+for (const how of ['a save of the form', 'a reconnection']) {
+  test(`${how} during a publication never sends a wait twice nor passes the budget`, async (t) => {
+    const clock = testClock({ start: NOW });
+    const { world, ports } = bigWorld(clock);
+    const ctx = await live({ clock, world });
+    await ctx.begin();
+    for (const id of ports.slice(0, 1)) await ctx.create('to-usa', id);
+    // All the devices exist; their values come at the next read.
+    for (const id of ports.slice(1)) {
+      const device = ctx.gladys.fake.discoveredDevices.find(
+        (d) => d.external_id === D('to-usa', id),
+      );
+      ctx.gladys.devices.push(structuredClone(device));
+    }
+    const slow = slowGladys(t, ctx.gladys);
+    await ctx.wait(INTERVAL);
+    assert.ok(slow.calls.length >= 1, 'a batch in flight');
+    if (how === 'a save of the form') {
+      ctx.app.configUpdated({ language: 'fr', interval_minutes: 15 });
+    } else {
+      ctx.app.disconnected();
+      ctx.app.connected(() => ctx.gladys.getConfig());
+    }
+    await slow.release(ctx.wait);
+    await ctx.app.idle();
+    await slow.release(ctx.wait);
+    assert.equal(twice(ctx.gladys), 0);
+    const sent = slow.calls.flat().length;
+    assert.ok(sent <= 250, `${sent} states within the minute`);
+  });
+}
+
+test('the budget window is a rolling minute: two publications 30 s apart share 250', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock, { every: 4 * HOUR });
+  const ports = Array.from({ length: 50 }, (_, i) => String(100000 + i));
+  world.cbp = () =>
+    ports.map((number) =>
+      cbpPort({
+        local: edt(clock.now()),
+        updated: edt(NOW),
+        number,
+        passenger: 1,
+        nexus: 2,
+        ready: 3,
+        commercial: 4,
+        fast: 5,
+      }),
+    );
+  const { begin, create, gladys, wait, app } = await live({ clock, world });
+  await begin();
+  const start = gladys.fake.states.length;
+  for (const id of ports.slice(0, 40)) await create('to-usa', id); // 40 x 6 = 240 states
+  assert.equal(gladys.fake.states.length - start, 240);
+  const first = gladys.fake.states.length;
+  await wait(30 * SECOND);
+  for (const id of ports.slice(40)) await create('to-usa', id); // 10 x 6 = 60 more: 10 allowed
+  assert.equal(gladys.fake.states.length - first, 10, 'the 240 of 30 s ago still count');
+  await wait(31 * SECOND);
+  await app.publishValues();
+  assert.equal(twice(gladys), 0);
+  const waits = gladys.fake.states.filter((st) => typeof st.state === 'number');
+  assert.equal(waits.length, 250, 'everything once the minute is over');
+});
+
+test('beyond the budget at every read, every feature gets its turn (fair rotation)', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock, { every: INTERVAL });
+  const ports = Array.from({ length: 70 }, (_, i) => String(100000 + i));
+  // A new reading of every lane at each read: 350 values, more than 250 every time.
+  world.cbp = () =>
+    ports.map((number) =>
+      cbpPort({
+        local: edt(clock.now()),
+        updated: edt(Math.floor(clock.now() / INTERVAL) * INTERVAL),
+        number,
+        passenger: 1,
+        nexus: 2,
+        ready: 3,
+        commercial: 4,
+        fast: 5,
+      }),
+    );
+  const { begin, gladys, wait } = await live({ clock, world });
+  await begin();
+  for (const id of ports) {
+    const device = gladys.fake.discoveredDevices.find((d) => d.external_id === D('to-usa', id));
+    gladys.devices.push(structuredClone(device));
+  }
+  await wait(3 * INTERVAL);
+  const fed = new Set(
+    gladys.fake.states
+      .filter((st) => typeof st.state === 'number')
+      .map((st) => st.device_feature_external_id),
+  );
+  assert.equal(fed.size, 350);
+});
+
+test('a CBP reading 119 min old at the read, created 3 min later: 122 min, not published from memory', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock);
+  world.cbp = () => [
+    cbpPort({ local: edt(clock.now()), updated: edt(NOW - 119 * MINUTE), passenger: 7 }),
+  ];
+  world.cbsa = () =>
+    cbsaCsv([
+      { office: 'Peace Bridge', updated: cbsaTime(NOW - 119 * MINUTE), travellers: '5 minutes' },
+    ]);
+  const { begin, create, wait, statesOf, gladys } = await live({
+    clock,
+    world,
+    config: { interval_minutes: 60 },
+  });
+  await begin();
+  await wait(3 * MINUTE);
+  await create('to-usa', '090101');
+  await create('to-canada', 'peace-bridge');
+  assert.equal(statesOf(F('to-usa', '090101', 'passenger')).length, 0);
+  assert.equal(statesOf(F('to-canada', 'peace-bridge', 'travellers')).length, 0);
+  assert.match(gladys.fake.lastState(F('to-usa', '090101', 'status')), /^Relevé périmé/);
+  // A minute after the read it was still fresh: published.
+  const clock2 = testClock({ start: NOW });
+  const world2 = liveWorld(clock2);
+  world2.cbp = () => [
+    cbpPort({ local: edt(clock2.now()), updated: edt(NOW - 119 * MINUTE), passenger: 7 }),
+  ];
+  const b = await live({ clock: clock2, world: world2, config: { interval_minutes: 60 } });
+  await b.begin();
+  await b.wait(30 * SECOND);
+  await b.create('to-usa', '090101');
+  assert.equal(b.statesOf(F('to-usa', '090101', 'passenger')).length, 1);
+});
+
+test('fall-back (1 November): a new reading of the repeated hour is published, a stale one is not', async () => {
+  const zone = 'America/Detroit';
+  const start = Date.UTC(2026, 10, 1, 5, 30); // 01:30 EDT
+  const clock = testClock({ start });
+  const world = liveWorld(clock);
+  let lane = localNaive(zone, Date.UTC(2026, 10, 1, 5, 20)); // 01:20 EDT
+  world.cbp = () => [
+    cbpPort({
+      number: '380001',
+      local: localNaive(zone, clock.now()),
+      updated: lane,
+      passenger: 9,
+    }),
+  ];
+  world.cbsa = () =>
+    cbsaCsv([
+      {
+        office: 'Ambassador Bridge',
+        updated: cbsaTime(start - 10 * MINUTE),
+        travellers: '4 minutes',
+      },
+    ]);
+  const { begin, create, wait, statesOf } = await live({
+    clock,
+    world,
+    config: { interval_minutes: 40 },
+  });
+  await begin();
+  await create('to-usa', '380001');
+  const fid = F('to-usa', '380001', 'passenger');
+  assert.equal(statesOf(fid).length, 1);
+  // 40 min later: 01:10 EST (06:10 UTC); a new reading "1:05 am" (06:05 UTC) looks older locally.
+  lane = localNaive(zone, Date.UTC(2026, 10, 1, 6, 5));
+  assert.equal(lane, Date.UTC(2026, 10, 1, 1, 5));
+  await wait(40 * MINUTE);
+  assert.equal(statesOf(fid).length, 2, 'the new reading of the repeated hour');
+  // Two hours later the reading of 01:05 EST is not refreshed: stale at 03:06 EST.
+  await wait(80 * MINUTE);
+  await wait(40 * MINUTE);
+  assert.equal(statesOf(fid).length, 2);
+});
+
+test('fall-back: a reading of 23:30 EDT seen at 01:00 EST is 2.5 h old: never published', async () => {
+  const zone = 'America/Detroit';
+  const start = Date.UTC(2026, 10, 1, 6, 0); // 01:00 EST
+  const clock = testClock({ start });
+  const world = liveWorld(clock);
+  world.cbp = () => [
+    cbpPort({
+      number: '380001',
+      local: localNaive(zone, clock.now()),
+      updated: localNaive(zone, Date.UTC(2026, 10, 1, 3, 30)),
+      passenger: 9,
+    }),
+  ];
+  const { begin, create, statesOf, gladys } = await live({ clock, world });
+  await begin();
+  await create('to-usa', '380001');
+  assert.equal(statesOf(F('to-usa', '380001', 'passenger')).length, 0);
+  assert.match(gladys.fake.lastState(F('to-usa', '380001', 'status')), /^Relevé périmé/);
+});
+
+test('spring-forward (8 March): a reading of 01:45 EST seen at 04:30 EDT (105 min) is published', async () => {
+  const zone = 'America/New_York';
+  const start = Date.UTC(2026, 2, 8, 8, 30); // 04:30 EDT
+  const clock = testClock({ start });
+  const world = liveWorld(clock);
+  world.cbp = () => [
+    cbpPort({
+      local: localNaive(zone, clock.now()),
+      updated: localNaive(zone, Date.UTC(2026, 2, 8, 6, 45)),
+      passenger: 9,
+    }),
+  ];
+  const { begin, create, statesOf } = await live({ clock, world });
+  await begin();
+  await create('to-usa', '090101');
+  assert.equal(statesOf(F('to-usa', '090101', 'passenger')).length, 1);
+});
+
+test('a 304 of the CBSA keeps the source read fine (no format error said)', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock);
+  const body = world.cbsa();
+  let calls = 0;
+  world.cbsa = () => {
+    calls += 1;
+    return calls === 1
+      ? text(body, { headers: { etag: '"a"' } })
+      : new Response(null, { status: 304 });
+  };
+  world.cbp = () => new Error('down');
+  const { begin, wait, app, gladys } = await live({ clock, world });
+  await begin();
+  await wait(INTERVAL);
+  assert.equal(calls, 2);
+  assert.deepEqual(app.outcome.cbsa, { ok: true });
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  assert.doesNotMatch(gladys.fake.connectionStatus.message.fr, /format inattendu/);
+});
+
+test('a 429 of the English CBSA file: the French one (same host) is not asked', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock);
+  world.cbsa = () => text('no', { status: 429, headers: { 'retry-after': '1800' } });
+  const { begin, wait, sources } = await live({ clock, world });
+  await begin();
+  assert.equal(sources.count('cbsa'), 1);
+  assert.equal(sources.count('cbsaFr'), 0);
+  await wait(INTERVAL);
+  assert.equal(sources.count('cbsa'), 1, 'paused');
+  assert.equal(sources.count('cbsaFr'), 0, 'paused with it');
+  assert.equal(sources.count('cbp'), 2);
+});
+
+test('a read cut by a save: the sources it had not asked yet are read a minute later, the others at their interval', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock);
+  const cbsa = world.cbsa;
+  let hold = true;
+  world.cbsa = (init) => (hold ? 'hang' : cbsa(init));
+  const { app, gladys, wait, sources } = await live({ clock, world });
+  await app.connected(() => gladys.getConfig());
+  await wait(10);
+  assert.equal(sources.count('cbsa'), 1);
+  assert.equal(sources.count('cbp'), 0);
+  hold = false;
+  await app.configUpdated({ language: 'fr', interval_minutes: 15 });
+  await wait(MINUTE + SECOND);
+  assert.equal(sources.count('cbp'), 1, 'never asked: read a minute later');
+  assert.equal(sources.count('cbsa'), 1, 'asked (even if cut): not again before its interval');
+  assert.ok(app.cbp, 'CBP read');
+  await wait(INTERVAL);
+  assert.equal(sources.count('cbsa'), 2);
+  assert.equal(sources.count('cbp'), 2);
+  const at = (key) => sources.requests.filter((r) => r.key === key).map((r) => r.at);
+  for (const key of ['cbsa', 'cbp']) {
+    const [a, b] = at(key);
+    assert.ok(b - a >= INTERVAL, `${key}: ${b - a}`);
+  }
+});
+
+test('restart between two reads: device statuses are left as they are (no "waiting" text)', async () => {
+  const store = createMemoryStore();
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock);
+  const a = await live({ store, clock, world });
+  await a.begin();
+  await a.create('to-canada', 'peace-bridge');
+  await a.app.stop();
+  const b = await live({ store, clock, world, devices: a.gladys.devices });
+  await b.begin();
+  assert.equal(b.sources.count('cbsa'), 0);
+  assert.equal(b.statesOf(F('to-canada', 'peace-bridge', 'status')).length, 0);
+  assert.equal(b.gladys.fake.connectionStatus.connected, true);
+});
+
+test('a device without a wait feature (an older structure) never gets a state for it', async () => {
+  const { begin, gladys, app } = await live();
+  await begin();
+  const device = structuredClone(
+    gladys.fake.discoveredDevices.find((d) => d.external_id === D('to-canada', 'peace-bridge')),
+  );
+  device.features = device.features.filter((f) => f.external_id.endsWith(':status'));
+  await gladys.fake.deviceCreated(device);
+  await app.publishValues();
+  const sent = gladys.fake.states.filter((st) =>
+    st.device_feature_external_id.startsWith(D('to-canada', 'peace-bridge')),
+  );
+  assert.ok(sent.length >= 1);
+  assert.ok(sent.every((st) => st.device_feature_external_id.endsWith(':status')));
 });

@@ -99,14 +99,9 @@ export function parseUpdated(text) {
   if (offset === undefined) return undefined;
   const [y, mo, d, h, mi] = m.slice(1, 6).map(Number);
   const local = Date.UTC(y, mo - 1, d, h, mi);
-  const back = new Date(local);
-  if (
-    back.getUTCFullYear() !== y ||
-    back.getUTCMonth() !== mo - 1 ||
-    back.getUTCDate() !== d ||
-    h > 23 ||
-    mi > 59
-  ) {
+  // One exact check: the date and time written back must be the ones read
+  // (a 30 February, a 24:00 or a 12:60 would come back as another moment).
+  if (new Date(local).toISOString().slice(0, 16) !== `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}`) {
     return undefined;
   }
   return local - offset * 60_000;

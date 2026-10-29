@@ -49,11 +49,11 @@
 - Freshness: at most 2 hours (`MAX_AGE`), a reading published once (source
   time kept in /data), without `created_at` so that scenes fire. The CBSA
   age is counted from the server `Date` header (within a day of our clock),
-  CBP's from the local time of the port, plus the time since the read
-  (monotonic). The CBP zone abbreviation is never used (typed by hand, wrong
+  CBP's from the feed time of the port (both in UTC with the port's zone),
+  plus the time since the read (monotonic). The CBP zone abbreviation is never used (typed by hand, wrong
   at times: "EST" in October at Port Huron).
-- A CBP feed whose latest port time does not move forward for over 2 hours is
-  stale (time and date of its last move in /data).
+- A CBP feed whose latest port time (UTC) does not move forward for over
+  2 hours is stale (time and date of its last move in /data).
 - Pace: interval 10 to 60 min (default 15), one read at a time, the next one
   armed before anything is awaited; /data saves awaited 5 s at most.
 - 429/5xx: pause per source, 5 min doubled, `Retry-After` honoured, 60 s to
@@ -66,8 +66,33 @@
   rest at the next read, said in the status.
 - Discovery: the crossings seen in the last 30 days, kept in /data (offered
   right after a restart, before the first read).
-- Real-clock test sped up 100 times (not 20): the shortest interval is
-  10 minutes, three reads at ×20 would take 90 s, above the 60 s test timeout.
+- Real-clock test at ×20 (the project rule): two reads, one period of the
+  shortest interval (10 min = 30 s), within the 60 s test timeout (three
+  reads would take 90 s).
+- CBP times (review r1, I2): each port gets its IANA zone from its CBP
+  district (`src/zones.js`; Eastport and Porthill, Idaho, Pacific), an unknown
+  district the zone matching its feed time against the `Date` header; local
+  times become UTC (Intl, full ICU of the Node image), deduplicated on UTC. The
+  repeated hour of November: the earlier instant, unless a reading of the same
+  lane was already published at or after it (then the later): never a stale
+  reading as fresh; a fresh reading of that hour, never seen before, is left
+  out (once a year, said in the docs).
+- Publication (review r1, I1): one at a time (queued); each batch counted in
+  the budget and marked published before the request, unmarked only if
+  Gladys refuses it. A device created publishes from memory at once; an
+  update sends nothing again.
+- A read cut by a save or a reconnection resumes a minute later for the
+  sources not asked yet (review r1, m8; a source asked, even cut, waits for its
+  interval, as s11 checks); each source keeps its own interval.
+- After a restart, a source read fine within the interval (time in /data)
+  shows the integration connected; device statuses are not replaced before the
+  next read (review r1, m2).
+- /data is read asynchronously, at most 1 MB, raced against 5 s (review r1,
+  m5): a /data that never answers is unreadable, not empty.
+- Kept as it is (review r1, m6): a restart with /data unreadable or not
+  writable reads at once (documented).
+- Equivalent mutants: the 60 s floor of a pause (the base is 5 min, review r1
+  P2).
 
 ## Later
 

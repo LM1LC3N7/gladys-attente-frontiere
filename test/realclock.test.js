@@ -1,9 +1,10 @@
 // -----------------------------------------------------------------------------
 // The app on a REAL moving clock (performance.now, Date.now, setTimeout, sped
-// up 100 times: the 10 minutes of the shortest interval are 6 s) and a real
-// local HTTP server playing both sources: the reads really start at 0, the
-// interval and twice the interval, never sooner, with a bounded number of
-// timers. The real clock moves between any two reads of it.
+// up 20 times as the project rules ask: the 10 minutes of the shortest
+// interval are 30 s) and a real local HTTP server playing both sources: the
+// reads really start at 0 and at the interval, never sooner, with a bounded
+// number of timers. Two reads (one period) fit in the 60 s test timeout;
+// three would take 90 s. The real clock moves between any two reads of it.
 // -----------------------------------------------------------------------------
 
 import { test } from 'node:test';
@@ -16,10 +17,10 @@ import { createMemoryStore } from '../src/store.js';
 import { measurePeriod, realClock, spyOn } from './helpers/clock.js';
 import { cbpPort, cbsaCsv, cbsaTime, edt, quiet } from './helpers/app.js';
 
-const SPEED = 100;
+const SPEED = 20;
 const INTERVAL = 10 * MINUTE;
 
-test('real clock: reads at 0, the interval and twice the interval; timers bounded', async () => {
+test('real clock x20: reads at 0 and at the interval, never sooner; timers bounded', async () => {
   const clock = realClock({ speed: SPEED });
   const reads = [];
   const server = createServer((req, res) => {
@@ -57,15 +58,15 @@ test('real clock: reads at 0, the interval and twice the interval; timers bounde
   const started = clock.monotonic();
   try {
     await app.connected(() => gladys.getConfig());
-    const gaps = await measurePeriod(spy, { count: 3, period: INTERVAL });
-    assert.equal(gaps.length, 2);
+    const gaps = await measurePeriod(spy, { count: 2, period: INTERVAL });
+    assert.equal(gaps.length, 1);
     assert.ok(spy.calls[0].at - started < MINUTE, 'the first read at once');
     for (const gap of gaps) assert.ok(gap >= INTERVAL, `never sooner than the interval: ${gaps}`);
     // Seen by the server too (the request leaves just after the decision).
-    for (let i = 0; i < 400 && reads.length < 3; i += 1) {
+    for (let i = 0; i < 400 && reads.length < 2; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    assert.equal(reads.length, 3);
+    assert.equal(reads.length, 2);
     for (let i = 1; i < reads.length; i += 1) {
       assert.ok(reads[i] - reads[i - 1] >= 0.9 * INTERVAL, `server gaps: ${reads}`);
     }

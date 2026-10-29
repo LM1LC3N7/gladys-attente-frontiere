@@ -30,7 +30,7 @@
 
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { FormatError, frenchNames, parseCbsaEnglish, parseCbsaFrench } from './cbsa.js';
-import { parseCbp } from './cbp.js';
+import { parseCbp, resolvePort } from './cbp.js';
 import { normalizeConfig } from './config.js';
 import {
   CATALOG_KEEP,
@@ -66,6 +66,13 @@ const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 /** A save of /data is awaited this long at most: a frozen /data never holds a read back. */
 const SAVE_WAIT = 5 * SECOND;
 const PAUSE_CODES = new Set(['rate_limited', 'server']);
+
+/** The list started at `cursor` (modulo its length), wrapping around. */
+function rotate(list, cursor) {
+  if (list.length === 0) return list;
+  const start = cursor % list.length;
+  return [...list.slice(start), ...list.slice(0, start)];
+}
 
 /** A pause read back from /data: in memory it ends at a monotonic `due`, its rest capped to PAUSE_MAX. */
 function validPause(pause, now, mono) {
@@ -176,15 +183,54 @@ export class BorderApp {
     this.cbsaFr = undefined;
     this.cbp = undefined;
 
-    const at = now();
-    const mono = monotonic();
-    const loaded = store.load();
-    const kept = loaded.ok ? loaded.data : {};
-    /** /data unreadable: set aside at the first start; values seen first are a baseline, not news. */
-    this.dataUnreadable = !loaded.ok;
-    this.dataBlocked = !loaded.ok;
-    this.baseline = { ca: !loaded.ok, us: !loaded.ok };
+    /** /data is read (bounded) at the first start: nothing is written before. */
+    this.loaded = false;
+    this.dataUnreadable = false;
+    this.dataBlocked = false;
+    this.baseline = { ca: false, us: false };
     this.pauses = {};
+    this.catalog = new Map();
+    this.published = new Map();
+    this.lastAttemptAt = undefined;
+    this.lastReadMono = undefined;
+    this.cbpFeed = undefined;
+    /** The last successful read of each source before a restart (wall), from /data. */
+    this.lastOk = {};
+    /** Monotonic time of the read in which each source was last requested (pace per source). */
+    this.sourceAt = {};
+    /** A read cut by a save or a reconnection: the sources it had not asked, one minute later. */
+    this.retryAt = undefined;
+    /** Fair rotation of the states put off by the budget. */
+    this.cursor = { values: 0, texts: 0 };
+    this.publishRun = Promise.resolve();
+    this.discoveryKey = undefined;
+  }
+
+  /** Reads /data once, bounded in time (a /data that never answers is unreadable, not empty). */
+  async load() {
+    if (this.loaded) return;
+    let loaded;
+    let timer;
+    try {
+      loaded = await Promise.race([
+        Promise.resolve().then(() => this.store.load()),
+        new Promise((resolve) => {
+          timer = this.timers.setTimeout(() => resolve({ ok: false, code: 'timeout' }), SAVE_WAIT);
+        }),
+      ]);
+    } catch {
+      loaded = { ok: false, code: 'error' };
+    } finally {
+      this.timers.clearTimeout(timer);
+    }
+    this.loaded = true;
+    const at = this.now();
+    const mono = this.monotonic();
+    const kept = loaded?.ok ? loaded.data : {};
+    /** /data unreadable: set aside at the first start; values seen first are a baseline, not news. */
+    this.dataUnreadable = !loaded?.ok;
+    this.dataBlocked = !loaded?.ok;
+    this.baseline = { ca: this.dataUnreadable, us: this.dataUnreadable };
     for (const source of Object.values(SOURCES)) {
       const pause = validPause(kept.pauses?.[source], at, mono);
       if (pause) this.pauses[source] = pause;
@@ -196,7 +242,7 @@ export class BorderApp {
     this.lastAttemptAt = finite(kept.lastAttemptAt) ? Math.min(kept.lastAttemptAt, at) : undefined;
     this.lastReadMono =
       this.lastAttemptAt === undefined ? undefined : mono - (at - this.lastAttemptAt);
-    // The time of the CBP feed and when it last moved (a frozen feed is stale).
+    // The time of the CBP feed (UTC) and when it last moved (a frozen feed is stale).
     const feed = kept.cbpFeed;
     this.cbpFeed =
       feed && finite(feed.time) && finite(feed.changedAt)
@@ -206,7 +252,10 @@ export class BorderApp {
             changedMono: mono - (at - Math.min(feed.changedAt, at)),
           }
         : undefined;
-    this.discoveryKey = undefined;
+    for (const source of [SOURCES.CBSA, SOURCES.CBP]) {
+      const when = kept.lastOk?.[source];
+      if (finite(when) && when <= at) this.lastOk[source] = when;
+    }
   }
 
   get intervalMs() {
@@ -307,6 +356,7 @@ export class BorderApp {
     await this.lifecycle;
     await this.configRun;
     await this.busy;
+    await this.publishRun;
   }
 
   serialize(job) {
@@ -320,6 +370,8 @@ export class BorderApp {
     const previous = this.config;
     this.config = normalizeConfig(raw);
     const gen = this.run;
+    await this.load();
+    if (gen !== this.run) return;
     if (this.dataUnreadable && this.dataBlocked) {
       // Never overwritten: kept under another name, then a fresh file.
       try {
@@ -346,14 +398,20 @@ export class BorderApp {
     this.gladys.forgetPublishedStates?.();
     await this.publishDiscovery();
     if (gen !== this.run) return;
-    await this.publishValues(gen);
-    if (gen !== this.run) return;
+    // Queued behind a publication in flight, never awaited here: a slow Gladys
+    // never holds a start back, and nothing is sent twice (see publishValues).
+    this.publishValues().catch(() => {});
     await this.updateStatus();
     if (gen !== this.run) return;
     this.schedule();
   }
 
   doStop() {
+    if (this.running && this.busy) {
+      // A read cut by a save or a reconnection: the sources it had not asked
+      // yet are read a minute later (each source keeps its own pace).
+      this.retryAt = this.monotonic() + MINUTE;
+    }
     this.running = false;
     this.run += 1;
     if (this.timer !== undefined) {
@@ -371,10 +429,9 @@ export class BorderApp {
     if (!this.running) return;
     if (this.timer !== undefined) this.timers.clearTimeout(this.timer);
     const mono = this.monotonic();
-    const due = Math.max(
-      this.lastReadMono === undefined ? mono : this.lastReadMono + this.intervalMs,
-      mono + minDelay,
-    );
+    let next = this.lastReadMono === undefined ? mono : this.lastReadMono + this.intervalMs;
+    if (this.retryAt !== undefined) next = Math.min(next, this.retryAt);
+    const due = Math.max(next, mono + minDelay);
     const gen = this.run;
     this.timer = this.timers.setTimeout(
       () => {
@@ -394,14 +451,24 @@ export class BorderApp {
       return undefined;
     }
     const mono = this.monotonic();
-    if (this.lastReadMono !== undefined && mono - this.lastReadMono < this.intervalMs) {
+    const retry = this.retryAt !== undefined && mono >= this.retryAt;
+    if (!retry && this.lastReadMono !== undefined && mono - this.lastReadMono < this.intervalMs) {
       this.schedule();
       return undefined;
     }
+    // A resumed read is the new anchor of the pace; the sources it already
+    // asked less than an interval ago are skipped.
+    this.retryAt = undefined;
     this.lastReadMono = mono;
     this.lastAttemptAt = this.now();
     this.schedule();
-    const tracked = this.read(gen, mono).finally(() => {
+    const skip = new Set(
+      Object.values(SOURCES).filter(
+        (source) =>
+          this.sourceAt[source] !== undefined && mono - this.sourceAt[source] < this.intervalMs,
+      ),
+    );
+    const tracked = this.read(gen, mono, skip).finally(() => {
       if (this.busy === tracked) this.busy = undefined;
     });
     this.busy = tracked;
@@ -410,27 +477,34 @@ export class BorderApp {
 
   // --- One read ------------------------------------------------------------------
 
-  async read(gen, mono) {
+  /** One read; `skip`: the sources asked less than an interval ago (a read resumed after a cut). */
+  async read(gen, mono, skip = new Set()) {
     const abort = new AbortController();
     this.abort = abort;
     try {
       // The time of this attempt in /data before any request (the pace survives a restart).
       await this.saveState();
       if (gen !== this.run) return;
-      await this.readSource(SOURCES.CBSA, gen, abort.signal, mono);
+      if (!skip.has(SOURCES.CBSA)) await this.readSource(SOURCES.CBSA, gen, abort.signal, mono);
       if (gen !== this.run) return;
-      if (this.config.language === 'fr') {
-        await this.readSource(SOURCES.CBSA_FR, gen, abort.signal, mono);
+      // The French file is on the same host: never asked right after a 429/5xx (or during a pause) of the English one.
+      const refused = ['rate_limited', 'server', 'paused'].includes(
+        this.outcome[SOURCES.CBSA]?.code,
+      );
+      if (this.config.language === 'fr' && !refused) {
+        if (!skip.has(SOURCES.CBSA_FR)) {
+          await this.readSource(SOURCES.CBSA_FR, gen, abort.signal, mono);
+        }
         if (gen !== this.run) return;
-      } else {
+      } else if (this.config.language !== 'fr') {
         this.outcome[SOURCES.CBSA_FR] = undefined;
       }
-      await this.readSource(SOURCES.CBP, gen, abort.signal, mono);
+      if (!skip.has(SOURCES.CBP)) await this.readSource(SOURCES.CBP, gen, abort.signal, mono);
       if (gen !== this.run) return;
       this.updateCatalog();
       await this.publishDiscovery();
       if (gen !== this.run) return;
-      await this.publishValues(gen);
+      await this.publishValues();
       if (gen !== this.run) return;
       await this.updateStatus();
       await this.saveState();
@@ -447,6 +521,8 @@ export class BorderApp {
       this.outcome[source] = { ok: false, code: 'paused', until: pause.due };
       return;
     }
+    // Asked: counts for the pace of this source even if the answer is cut or dropped.
+    this.sourceAt[source] = mono;
     const isCbp = source === SOURCES.CBP;
     const previous =
       source === SOURCES.CBSA ? this.cbsa : source === SOURCES.CBSA_FR ? this.cbsaFr : undefined;
@@ -468,6 +544,7 @@ export class BorderApp {
       this.failed(source, err);
       return;
     }
+    // An answer to a read stopped meanwhile changes nothing.
     if (gen !== this.run) return;
     const at = this.monotonic();
     const wall = this.now();
@@ -475,6 +552,7 @@ export class BorderApp {
     if (answer.status === 304 && previous) {
       // Not modified: the readings keep their dates (their age grows on the monotonic clock).
       this.outcome[source] = { ok: true };
+      this.lastOk[source] = wall;
       return;
     }
     if (answer.status === 304) {
@@ -501,14 +579,27 @@ export class BorderApp {
         this.cbsaFr = { names, etag: answer.etag, lastModified: answer.lastModified };
         this.frNames = frenchNames(this.cbsaText, names);
       } else {
-        const { ports, feedTime } = parseCbp(answer.text);
-        this.cbp = { ports: new Map(ports.map((port) => [port.id, port])), at };
+        const { ports } = parseCbp(answer.text);
+        // Local times -> UTC with the zone of each port; a lane repeated in
+        // November is told apart with the reading last published for it.
+        const resolved = ports.map((port) => {
+          const ids = idsOf(this.gladys, 'us', port.id);
+          return resolvePort(port, ref, (key) => this.published.get(ids.feature(key)));
+        });
+        let feedTime;
+        for (const port of resolved) {
+          if (port.feedUtc !== undefined && (feedTime === undefined || port.feedUtc > feedTime)) {
+            feedTime = port.feedUtc;
+          }
+        }
+        this.cbp = { ports: new Map(resolved.map((port) => [port.id, port])), at };
         // A feed time that moves forward is a living feed; the same (or older) one is not.
         if (feedTime !== undefined && (!this.cbpFeed || feedTime > this.cbpFeed.time)) {
           this.cbpFeed = { time: feedTime, changedAt: wall, changedMono: at };
         }
       }
       this.outcome[source] = { ok: true };
+      this.lastOk[source] = wall;
     } catch (err) {
       if (!(err instanceof FormatError)) throw err;
       this.outcome[source] = { ok: false, code: 'format' };
@@ -582,7 +673,7 @@ export class BorderApp {
     for (const key of WAIT_KEYS.us) {
       const lane = port.lanes[key];
       if (lane.kind === 'wait' && lane.stamp !== undefined && lane.age + grown <= MAX_AGE) {
-        values[key] = { minutes: lane.minutes, stamp: lane.stamp };
+        values[key] = { minutes: lane.minutes, stamp: lane.stamp, naive: lane.naive };
       }
     }
     const main = port.lanes.passenger;
@@ -594,11 +685,11 @@ export class BorderApp {
     let status;
     if (main.kind === 'wait') {
       if (main.stamp === undefined) status = { code: 'undated' };
-      else if (main.age + grown > MAX_AGE) status = { code: 'stale', time: timeOf(main.stamp) };
-      else status = { code: 'open', time: timeOf(main.stamp) };
+      else if (main.age + grown > MAX_AGE) status = { code: 'stale', time: timeOf(main.naive) };
+      else status = { code: 'open', time: timeOf(main.naive) };
     } else if (Object.keys(values).length > 0) {
       const first = Object.values(values)[0];
-      status = { code: 'open', time: timeOf(first.stamp) };
+      status = { code: 'open', time: timeOf(first.naive) };
     } else if (main.kind === 'closed') {
       status = { code: 'lanes_closed', time: timeOf(port.portTime) };
     } else {
@@ -685,9 +776,18 @@ export class BorderApp {
 
   /**
    * The waits of the readings not published yet (each source reading once),
-   * then the status texts that changed, within the budget.
+   * then the status texts that changed, within the budget. One publication
+   * at a time (queued): a start or a device created during a publication
+   * waits for it, and sees what it sent.
    */
-  async publishValues(gen) {
+  publishValues() {
+    const run = this.publishRun.then(() => this.doPublish());
+    this.publishRun = run.catch(() => {});
+    return run;
+  }
+
+  async doPublish() {
+    if (!this.running) return;
     const mono = this.monotonic();
     const values = [];
     const texts = [];
@@ -711,7 +811,8 @@ export class BorderApp {
         baselineDone[device.kind] = true;
       }
       const fid = ids.feature('status');
-      if (device.features.has(fid)) {
+      // Nothing read yet since the start: Gladys keeps the last status shown.
+      if (device.features.has(fid) && view.status.code !== 'waiting') {
         const text = deviceStatus(this.config.language, view.status.code, view.status.time);
         if (this.sentTexts.get(fid) !== text) texts.push({ fid, text });
       }
@@ -720,62 +821,73 @@ export class BorderApp {
       const loaded = kind === 'ca' ? this.cbsa : this.cbp;
       if (this.baseline[kind] && (baselineDone[kind] || loaded)) this.baseline[kind] = false;
     }
-    let left = this.budgetLeft(mono);
+    let left = Math.max(0, this.budgetLeft(mono));
     this.deferred = values.length + texts.length > left;
-    const sendValues = values.slice(0, Math.max(0, left));
+    // Under the budget, the states put off start the next round (fair rotation).
+    const sendValues = rotate(values, this.cursor.values).slice(0, left);
+    if (values.length > sendValues.length) this.cursor.values += sendValues.length;
     left -= sendValues.length;
-    const sendTexts = texts.slice(0, Math.max(0, left));
+    const sendTexts = rotate(texts, this.cursor.texts).slice(0, left);
+    if (texts.length > sendTexts.length) this.cursor.texts += sendTexts.length;
     for (let i = 0; i < sendValues.length; i += 100) {
       const batch = sendValues.slice(i, i + 100);
+      // Counted and marked BEFORE the request: a start or a reconnection
+      // during it never sends the same reading again nor passes the budget.
+      this.sentLog.push({ at: mono, n: batch.length });
+      const before = batch.map((v) => this.published.get(v.fid));
+      for (const v of batch) this.published.set(v.fid, v.stamp);
       try {
         await this.gladys.publishStates(
           batch.map((v) => ({ device_feature_external_id: v.fid, state: v.state })),
         );
       } catch (err) {
+        // Refused: sent again at the next publication (unless a newer one took its place).
+        batch.forEach((v, k) => {
+          if (this.published.get(v.fid) !== v.stamp) return;
+          if (before[k] === undefined) this.published.delete(v.fid);
+          else this.published.set(v.fid, before[k]);
+        });
         this.logger.warn(`Values not published (${err?.name ?? 'Error'}): next read`);
-        this.sentLog.push({ at: mono, n: batch.length });
         this.deferred = true;
         return;
       }
-      this.sentLog.push({ at: mono, n: batch.length });
-      if (gen !== this.run) return;
-      for (const v of batch) this.published.set(v.fid, v.stamp);
     }
     if (this.published.size > MAX_PUBLISHED) {
       this.published = new Map([...this.published].slice(-MAX_PUBLISHED));
     }
     for (let i = 0; i < sendTexts.length; i += 100) {
       const batch = sendTexts.slice(i, i + 100);
+      this.sentLog.push({ at: mono, n: batch.length });
+      for (const t of batch) this.sentTexts.set(t.fid, t.text);
       try {
         await this.gladys.publishStates(
           batch.map((t) => ({ device_feature_external_id: t.fid, text: t.text })),
         );
       } catch (err) {
+        for (const t of batch) {
+          if (this.sentTexts.get(t.fid) === t.text) this.sentTexts.delete(t.fid);
+        }
         this.logger.warn(`Statuses not published (${err?.name ?? 'Error'})`);
-        this.sentLog.push({ at: mono, n: batch.length });
         this.deferred = true;
         return;
       }
-      this.sentLog.push({ at: mono, n: batch.length });
-      if (gen !== this.run) return;
-      for (const t of batch) this.sentTexts.set(t.fid, t.text);
     }
   }
 
-  /** A device created: its waits are sent at the next read (never a read now). */
+  /** A device created: Gladys holds nothing for it, its readings in memory are sent at once (never a read). */
   async onDeviceCreated(device) {
     this.forgetDevice(device);
+    if (this.running) await this.publishValues();
   }
 
-  async onDeviceUpdated(device) {
-    this.forgetDevice(device);
-  }
+  /** A device renamed or moved: Gladys keeps its values, nothing to send again. */
+  async onDeviceUpdated() {}
 
   async onDeviceDeleted(device) {
     this.forgetDevice(device);
   }
 
-  /** Gladys holds nothing for a new device: its last readings may be sent again. */
+  /** Gladys holds nothing for this device: its last readings may be sent again. */
   forgetDevice(device) {
     const parsed = parseDeviceId(this.gladys, device?.external_id);
     if (!parsed) return;
@@ -797,8 +909,15 @@ export class BorderApp {
     const tried = [SOURCES.CBSA, SOURCES.CBP].some((s) => this.outcome[s] !== undefined);
     if (!tried) {
       const due = this.lastReadMono === undefined ? mono : this.lastReadMono + this.intervalMs;
-      parts.unshift(T.waiting(Math.max(0, due - mono)));
-      await this.setStatus(false, joinMessages(parts));
+      const left = Math.max(0, due - mono);
+      // Restarted between two reads: a source read fine within the interval
+      // (kept in /data) still counts; the next read comes at its pace.
+      const wall = this.now();
+      const fresh = Object.values(this.lastOk).some(
+        (at) => wall - at <= this.intervalMs + 5 * MINUTE,
+      );
+      parts.unshift(fresh ? T.nextRead(left) : T.waiting(left));
+      await this.setStatus(fresh, joinMessages(parts));
       return;
     }
     let connected = false;
@@ -836,7 +955,7 @@ export class BorderApp {
 
   /** Writes /data, awaited SAVE_WAIT at most (the save goes on in the background). */
   async saveState() {
-    if (this.dataBlocked) return false;
+    if (!this.loaded || this.dataBlocked) return false;
     const pauses = {};
     for (const [source, pause] of Object.entries(this.pauses)) {
       pauses[source] = {
@@ -855,6 +974,7 @@ export class BorderApp {
       cbpFeed: this.cbpFeed
         ? { time: this.cbpFeed.time, changedAt: this.cbpFeed.changedAt }
         : undefined,
+      lastOk: { ...this.lastOk },
     };
     const job = Promise.resolve()
       .then(() => this.store.save(data))

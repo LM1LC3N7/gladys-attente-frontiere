@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createFileStore } from '../src/store.js';
 import { NOW, setup } from './helpers/app.js';
 
@@ -20,9 +21,9 @@ const dirOf = async (t) => {
 test('no file yet: an empty state; a save then a load give it back', async (t) => {
   const file = join(await dirOf(t), 'state.json');
   const store = createFileStore(file);
-  assert.deepEqual(store.load(), { ok: true, data: {} });
+  assert.deepEqual(await store.load(), { ok: true, data: {} });
   await Promise.all([store.save({ a: 1 }), store.save({ a: 2 })]);
-  assert.deepEqual(store.load(), { ok: true, data: { a: 2 } });
+  assert.deepEqual(await store.load(), { ok: true, data: { a: 2 } });
 });
 
 test('a file that cannot be read is not an empty state', async (t) => {
@@ -34,9 +35,9 @@ test('a file that cannot be read is not an empty state', async (t) => {
   ]) {
     const file = join(dir, name);
     await writeFile(file, content);
-    assert.equal(createFileStore(file).load().ok, false, name);
+    assert.equal((await createFileStore(file).load()).ok, false, name);
   }
-  assert.equal(createFileStore(dir).load().ok, false, 'a directory (EISDIR)');
+  assert.equal((await createFileStore(dir).load()).ok, false, 'a directory (EISDIR)');
 });
 
 test('the app sets an unreadable /data file aside, keeps its bytes, then writes a new one', async (t) => {
@@ -61,6 +62,7 @@ test('what /data keeps: no personal data, bounded, validated when read back', as
     'catalog',
     'cbpFeed',
     'lastAttemptAt',
+    'lastOk',
     'pauses',
     'published',
     'v',
@@ -87,10 +89,41 @@ test('rubbish in /data is dropped entry by entry', async () => {
     cbpFeed: { time: 'x' },
   });
   const { app } = await setup({ store });
+  await app.load();
   assert.equal(app.lastAttemptAt, undefined);
   assert.deepEqual(Object.keys(app.pauses), []);
   assert.deepEqual([...app.catalog.keys()], ['us:090101']);
   assert.deepEqual([...app.published.keys()], ['a']);
   assert.equal(app.cbpFeed, undefined);
   assert.equal({}.polluted, undefined);
+});
+
+test('a FIFO in place of /data never blocks the start: unreadable, set aside', async (t) => {
+  const dir = await dirOf(t);
+  const file = join(dir, 'state.json');
+  execFileSync('mkfifo', [file]);
+  assert.equal((await createFileStore(file).load()).ok, false);
+  const { begin, sources, app } = await setup({ store: createFileStore(file) });
+  await begin();
+  assert.equal(app.dataUnreadable, true);
+  assert.equal(sources.count('cbsa'), 1);
+  assert.ok((await readdir(dir)).some((n) => n.startsWith('state.json.unreadable-')));
+});
+
+test('a /data load that never ends is bounded: unreadable after 5 s, never empty', async () => {
+  const store = {
+    load: () => new Promise(() => {}),
+    save: async () => {},
+    setAside: async () => {},
+  };
+  const { app, gladys, wait, sources } = await setup({ store });
+  const started = app.connected(() => gladys.getConfig());
+  await wait(0);
+  assert.equal(app.loaded, false);
+  await wait(5000);
+  await started;
+  await wait(0);
+  assert.equal(app.loaded, true);
+  assert.equal(app.dataUnreadable, true);
+  assert.equal(sources.count('cbsa'), 1);
 });

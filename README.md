@@ -16,8 +16,9 @@ traveller. Reports are welcome.
 
 ## How it works
 
-- One read every 10 to 60 minutes (15 by default), never more often, the time
-  of the last attempt kept in /data: the English CSV of the CBSA
+- One read every 10 to 60 minutes (15 by default), never more often for a
+  source (the exceptions are in the user guide), the time of the last attempt
+  kept in /data: the English CSV of the CBSA
   (`cbsa-asfc.gc.ca/bwt-taf/bwt-eng.csv`), its French one for the names when
   the form is in French, then the CBP JSON (`bwt.cbp.gov/api/bwtnew`), one
   request at a time, bounded in time (20 s) and size, honest User-Agent,
@@ -29,6 +30,8 @@ traveller. Reports are welcome.
   /data), only while at most 2 hours old, without `created_at`: a scene "wait
   below X min" fires on it. "Closed", "N/A", "--" and the like are never a
   number; the status text says them.
+- CBP local times become UTC with the zone of each port (from its CBP
+  district), exact across the changes of time.
 - 429/5xx pause the source concerned only (5 min doubled, `Retry-After`, 60 s
   to 6 h, kept across restarts); a frozen CBP feed (time unchanged for over
   2 h) is stale.

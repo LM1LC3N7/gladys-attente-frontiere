@@ -43,8 +43,10 @@ only: they can change quickly and do not replace the official information.
 
 A lane the crossing does not have simply never gets a value.
 
-- "No Delay" (CBSA) and "no delay" (CBP) are **0 minutes**: a zero wait
-  announced by the agency.
+- "No Delay" (CBSA) is **0 minutes**: a zero wait announced by the agency.
+  At CBP, the number of minutes given is published as it is, whether the lane
+  says "delay" or "no delay" (the real feed gives "no delay" with 0, 1 or
+  5 minutes).
 - "Closed", "Not Applicable", "--", "Lanes Closed", "Update Pending", "N/A"
   or an unknown text are **never published as a number**: the **Status**
   feature says it ("Closed", "Lanes closed", "Update pending at the source",
@@ -65,8 +67,18 @@ A lane the crossing does not have simply never gets a value.
   2 hours, nothing of it is published and the status becomes "Source silent
   for over 2 h: nothing published".
 - CBP types the time zone by hand (an "EST" shows up in October): it is not
-  used, the time is read as the local time of the port, the day before when it
-  is later than the time of the port.
+  used. Each port has its time zone (from its CBP district: Eastern, Central,
+  Mountain, Pacific, Alaska; an unknown district takes the zone whose offset
+  matches the feed time against the `Date` header): local times become exact
+  instants, changes of time included, the day before when they are later than
+  the time of the port.
+- **Changes of time**: in March, a reading from before the jump keeps its real
+  age. In November, the hour from 1 to 2 am happens twice: a reading time in
+  that hour, never seen before, is taken as the first of the two (the older):
+  a reading older than 2 hours is never taken for a fresh one, at the price,
+  once a year, of a fresh reading of that hour left out. A time that follows a
+  reading already published for the same lane is taken as the second: the new
+  reading is published.
 - Gladys keeps the last value published of a feature: when a wait is no longer
   known, the **Status** feature says it, not the value.
 
@@ -77,11 +89,17 @@ and the condition "lower than X". It fires on the first fresh reading below X.
 
 ## Pace and sources
 
-- One read every N minutes (10 to 60), never more often: saving the form, a
-  reconnection, the Discovery tab, a device created or a restart start no read
-  (the time of the last attempt is written to /data before each read). The one
-  exception: a restart while /data could not be read or written, which reads
-  at once.
+- One read every N minutes (10 to 60), never more often for the same source:
+  saving the form, a reconnection, the Discovery tab, a device created or a
+  restart start no read (the time of the last attempt is written to /data
+  before each read). Exceptions: an interval shortened in the form makes the
+  next read due sooner (at the new length after the last one, at the
+  earliest); a read cut by a save or a reconnection resumes a minute later,
+  for the sources it had not asked yet only (a source asked, even cut,
+  waits for its interval); a restart while /data could not be
+  read or written reads at once.
+- A device created gets at once the fresh readings already in memory (no
+  read); renaming or moving a device sends nothing again.
 - One request at a time: the English CBSA file, the French one (only when the
   language is French, for the names), then CBP. Each request is bounded to
   20 seconds and in size (256 KB for the CBSA, 4 MB for CBP).
@@ -90,20 +108,24 @@ and the condition "lower than X". It fires on the first fresh reading below X.
 - User-Agent: `gladys-attente-frontiere/<version> (+repository address)`.
 - A 429 or 5xx answer pauses **that source** (5 minutes doubled at each failure,
   `Retry-After` honoured, between 60 seconds and 6 hours), kept across a
-  restart. The other source is still read.
+  restart. The other source is still read. The French CBSA file (same server)
+  is not asked when the English one was just refused or is paused.
 - The French names of the CBSA never block anything: without them, the English
   names are used.
 
 ## Status of the integration
 
 "Connected" as soon as at least one of the two sources was read at its last
-attempt (CBP counts only while its feed still moves); before the first read,
-"Waiting for the first read (in N min)". The message says, per source, what is
+attempt (CBP counts only while its feed still moves). After a restart, before
+the next read: "connected" when a source was read fine within the interval
+(kept in /data), else "Waiting for the first read (in N min)"; the device
+statuses stay as already shown. The message says, per source, what is
 wrong: unreachable, no answer in time, paused after a 429 or a 5xx, unexpected
 format, frozen feed; and also an interval replaced (out of 10-60 minutes), a
 /data unreadable (set aside under another name) or not writable, values put
 off to the next read (Gladys accepts 300 states a minute, the module sends 250
-at most).
+at most over a rolling minute; beyond, the values put off come first the next
+time, in turn).
 
 ## Data and licences
 

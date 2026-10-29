@@ -137,6 +137,10 @@ export const T = {
     en: `Waiting for the first read (in ${minutes(ms)} min)`,
     fr: `En attente de la première lecture (dans ${minutes(ms)} min)`,
   }),
+  nextRead: (ms) => ({
+    en: `Last read fine before the restart; next read in ${minutes(ms)} min`,
+    fr: `Dernière lecture réussie avant le redémarrage ; prochaine lecture dans ${minutes(ms)} min`,
+  }),
   configUnread: (ms) => ({
     en: `The configuration could not be read from Gladys: next try in ${seconds(ms)} s`,
     fr: `Configuration illisible depuis Gladys : nouvel essai dans ${seconds(ms)} s`,
@@ -160,8 +164,8 @@ export const T = {
     fr: '/data non inscriptible : le rythme et les relevés publiés ne sont gardés qu’en mémoire',
   },
   budget: {
-    en: 'some values wait for the next read (300 states per minute at most)',
-    fr: 'des valeurs attendent la lecture suivante (300 états par minute au plus)',
+    en: 'some values wait for the next read (the module sends 250 states a minute at most, the core accepts 300)',
+    fr: 'des valeurs attendent la lecture suivante (le module envoie 250 états par minute au plus, le cœur en accepte 300)',
   },
 };
 
