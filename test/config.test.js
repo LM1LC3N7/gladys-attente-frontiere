@@ -1,33 +1,48 @@
+// -----------------------------------------------------------------------------
+// The form, normalized: defaults, bounds, strict numbers; a value replaced is
+// noted for the status (never repeated back).
+// -----------------------------------------------------------------------------
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeConfig, DEFAULT_CONFIG } from '../src/config.js';
+import { normalizeConfig } from '../src/config.js';
 
-test('normalizeConfig returns the defaults when called with no argument', () => {
-  assert.deepEqual(normalizeConfig(), DEFAULT_CONFIG);
+test('defaults: French, 15 minutes', () => {
+  assert.deepEqual(normalizeConfig(), { language: 'fr', intervalMinutes: 15, notes: [] });
+  assert.deepEqual(normalizeConfig({ interval_minutes: '', language: null }), {
+    language: 'fr',
+    intervalMinutes: 15,
+    notes: [],
+  });
+  assert.deepEqual(normalizeConfig(null).intervalMinutes, 15);
 });
 
-test('normalizeConfig keeps user values over the defaults', () => {
-  const config = normalizeConfig({ latitude: 45.5, longitude: -73.6, unit: 'fahrenheit' });
-  assert.equal(config.latitude, 45.5);
-  assert.equal(config.longitude, -73.6);
-  assert.equal(config.unit, 'fahrenheit');
+test('the interval: 10 to 60 minutes, out of bounds brought back and noted', () => {
+  assert.equal(normalizeConfig({ interval_minutes: 10 }).intervalMinutes, 10);
+  assert.equal(normalizeConfig({ interval_minutes: '45' }).intervalMinutes, 45);
+  assert.deepEqual(normalizeConfig({ interval_minutes: 5 }), {
+    language: 'fr',
+    intervalMinutes: 10,
+    notes: ['interval'],
+  });
+  assert.deepEqual(normalizeConfig({ interval_minutes: 0 }).intervalMinutes, 10);
+  assert.deepEqual(normalizeConfig({ interval_minutes: 600 }), {
+    language: 'fr',
+    intervalMinutes: 60,
+    notes: ['interval'],
+  });
+  for (const bad of [12.5, '12.5', 'abc', -3, '1e3', NaN, true]) {
+    const config = normalizeConfig({ interval_minutes: bad });
+    assert.equal(config.intervalMinutes, 15, String(bad));
+    assert.deepEqual(config.notes, ['interval'], String(bad));
+  }
 });
 
-test('normalizeConfig coerces numeric strings coming from a form', () => {
-  const config = normalizeConfig({ latitude: '48.8', longitude: '2.3', poll_frequency: '600' });
-  assert.equal(config.latitude, 48.8);
-  assert.equal(config.longitude, 2.3);
-  assert.equal(config.poll_frequency, 600);
-  assert.equal(typeof config.poll_frequency, 'number');
-});
-
-test('normalizeConfig falls back to the default for a missing numeric field', () => {
-  const config = normalizeConfig({ unit: 'celsius' });
-  assert.equal(config.poll_frequency, DEFAULT_CONFIG.poll_frequency);
-});
-
-test('GLADYS_PREFER_LOCAL defaults to true and only an explicit false disables it', () => {
-  assert.equal(normalizeConfig().GLADYS_PREFER_LOCAL, true);
-  assert.equal(normalizeConfig({ GLADYS_PREFER_LOCAL: true }).GLADYS_PREFER_LOCAL, true);
-  assert.equal(normalizeConfig({ GLADYS_PREFER_LOCAL: false }).GLADYS_PREFER_LOCAL, false);
+test('the language: fr or en', () => {
+  assert.equal(normalizeConfig({ language: 'en' }).language, 'en');
+  assert.deepEqual(normalizeConfig({ language: 'de' }), {
+    language: 'fr',
+    intervalMinutes: 15,
+    notes: ['language'],
+  });
 });

@@ -1,45 +1,47 @@
 // -----------------------------------------------------------------------------
-// Integration configuration.
-//
-// The configuration is filled in by the user in Gladys, from the `config_schema`
-// declared in `gladys-assistant-integration.json`. The SDK fetches it for you
-// (`gladys.getConfig()`) and notifies you of every change through
-// `gladys.onConfigUpdated()`.
-//
-// This module only provides defaults and normalizes the received object, so the
-// rest of the code never has to deal with `undefined`.
+// The configuration typed in Gladys (manifest `config_schema`), normalized so
+// that the rest of the code never sees `undefined` nor a value out of bounds.
+// Nothing secret: both sources are open data, without account nor key.
 // -----------------------------------------------------------------------------
 
-// Defaults: they MUST stay consistent with the `default` values declared in the
-// `config_schema` of the manifest.
-export const DEFAULT_CONFIG = {
-  latitude: 48.8566, // Paris
-  longitude: 2.3522,
-  unit: 'celsius', // 'celsius' | 'fahrenheit'
-  // Seconds between two reads of the polled sensors. Gladys polls at most once
-  // a minute: slower intervals are applied by skipping polls (see
-  // createPoller in src/devices/index.js).
-  poll_frequency: 300,
-  // Reserved key (NOT in config_schema): because the manifest declares both
-  // 'local' and 'cloud' in its `transports` field, Gladys shows a standard
-  // "Prefer the local connection" toggle and sends the user's choice here.
-  // Read-only for the integration; defaults to true.
-  GLADYS_PREFER_LOCAL: true,
-};
+import { INTERVAL_DEFAULT_MIN, INTERVAL_MAX_MIN, INTERVAL_MIN_MIN } from './constants.js';
+
+/** Defaults: the same as the `default` values of the manifest. */
+export const DEFAULT_CONFIG = { language: 'fr', interval_minutes: INTERVAL_DEFAULT_MIN };
+
+export const LANGUAGES = ['fr', 'en'];
 
 /**
- * Merge the user config with the defaults.
- * @param {Record<string, unknown>} raw config returned by the SDK
+ * @returns {{ language: 'fr'|'en', intervalMinutes: number, notes: string[] }}
+ * `notes` lists the values replaced (shown in the status, never the value typed).
  */
 export function normalizeConfig(raw = {}) {
-  return {
-    ...DEFAULT_CONFIG,
-    ...raw,
-    // Force the types: config may arrive as strings from a form.
-    latitude: Number(raw.latitude ?? DEFAULT_CONFIG.latitude),
-    longitude: Number(raw.longitude ?? DEFAULT_CONFIG.longitude),
-    poll_frequency: Number(raw.poll_frequency ?? DEFAULT_CONFIG.poll_frequency),
-    // The preference is a boolean; anything but an explicit false means true.
-    GLADYS_PREFER_LOCAL: raw.GLADYS_PREFER_LOCAL !== false,
-  };
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const notes = [];
+  let language = DEFAULT_CONFIG.language;
+  if (source.language !== undefined && source.language !== null && source.language !== '') {
+    if (LANGUAGES.includes(source.language)) {
+      language = source.language;
+    } else {
+      notes.push('language');
+    }
+  }
+  let intervalMinutes = DEFAULT_CONFIG.interval_minutes;
+  const typed = source.interval_minutes;
+  if (typed !== undefined && typed !== null && typed !== '') {
+    // Strict: '' or null is "not typed", never 0; a decimal or a text is refused.
+    const value = typeof typed === 'number' ? typed : /^\d{1,4}$/.test(`${typed}`) ? +typed : NaN;
+    if (Number.isInteger(value) && value >= INTERVAL_MIN_MIN && value <= INTERVAL_MAX_MIN) {
+      intervalMinutes = value;
+    } else if (Number.isInteger(value) && value > INTERVAL_MAX_MIN) {
+      intervalMinutes = INTERVAL_MAX_MIN;
+      notes.push('interval');
+    } else if (Number.isInteger(value) && value >= 0) {
+      intervalMinutes = INTERVAL_MIN_MIN;
+      notes.push('interval');
+    } else {
+      notes.push('interval');
+    }
+  }
+  return { language, intervalMinutes, notes };
 }
