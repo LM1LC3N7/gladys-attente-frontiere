@@ -111,3 +111,10 @@
 
 - The pedestrian lanes of CBP.
 - The Mexican border (out of the scope of this module).
+
+## Next patch (review r3, c4b42cf)
+
+- m1: a known-district port whose zone table is wrong can make the whole CBP feed "silent" via the feed-level lag check (reviewer's s18 b); keep only the per-port check or use the median lag.
+- m2: tests for LG2, LG3, LG5, FZ1, FZ2, FZ4.
+- m3: inherited and documented (restart loop on unwritable /data, slow /data set aside, guessed-zone DST drops).
+- m4: a server Date or wall clock off by more than 2 h silences CBP instead of publishing.
