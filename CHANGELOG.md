@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-30
+
 ### Added
 
 - First version: the wait times of the land border crossings between Canada
@@ -27,4 +29,5 @@ the notes of the version's GitHub Release.
   most, fair rotation beyond); a device created gets its fresh readings at
   once.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-attente-frontiere/commits/main
+[Unreleased]: https://github.com/LM1LC3N7/gladys-attente-frontiere/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-attente-frontiere/releases/tag/v0.1.1

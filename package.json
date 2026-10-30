@@ -1,6 +1,6 @@
 {
   "name": "gladys-attente-frontiere",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Border wait times between Canada and the U.S. for Gladys Assistant, both ways, from the open data of the CBSA (to Canada) and of CBP (to the U.S.): one device per crossing and direction, waits in minutes and a status. Read-only.",
   "type": "module",
