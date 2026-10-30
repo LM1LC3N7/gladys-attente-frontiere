@@ -118,3 +118,7 @@
 - m2: tests for LG2, LG3, LG5, FZ1, FZ2, FZ4.
 - m3: inherited and documented (restart loop on unwritable /data, slow /data set aside, guessed-zone DST drops).
 - m4: a server Date or wall clock off by more than 2 h silences CBP instead of publishing.
+
+## Next patch (review r4, 2ca7728)
+
+- A missing or broken package.json crashes at import (cannot happen in the image); fall back to "unknown" and keep a semver check in tests.
