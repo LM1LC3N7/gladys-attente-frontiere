@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { FetchError, getText, parseRetryAfter } from '../src/http.js';
+import { VERSION } from '../src/constants.js';
 
 async function serve(t, handler) {
   const seen = [];
@@ -57,7 +58,7 @@ test('a GET with an honest User-Agent, Accept and the conditional headers; 200 t
   const second = await get(url, { etag: first.etag, lastModified: first.lastModified });
   assert.equal(second.status, 304);
   assert.equal(seen[0].method, 'GET');
-  assert.match(seen[0].headers['user-agent'], /^gladys-attente-frontiere\/0\.1\.0 /);
+  assert.ok(seen[0].headers['user-agent'].startsWith(`gladys-attente-frontiere/${VERSION} `));
   assert.equal(seen[0].headers.accept, 'text/csv');
   assert.equal(seen[0].headers['if-none-match'], undefined);
   assert.equal(seen[1].headers['if-none-match'], '"v1"');

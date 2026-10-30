@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryStore } from '../src/store.js';
-import { MAX_AGE } from '../src/constants.js';
+import { MAX_AGE, VERSION } from '../src/constants.js';
 import {
   D,
   F,
@@ -93,7 +93,9 @@ test('first start: one read at once, the Discovery list of both sources, connect
   for (const r of sources.requests) {
     assert.match(
       r.headers['User-Agent'],
-      /^gladys-attente-frontiere\/0\.1\.0 \(\+https:\/\/github\.com\//,
+      new RegExp(
+        `^gladys-attente-frontiere/${VERSION.replaceAll('.', '\\.')} \\(\\+https://github\\.com/`,
+      ),
     );
     assert.ok(!/Mozilla/.test(r.headers['User-Agent']));
     assert.ok(r.headers.Accept);

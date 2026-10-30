@@ -4,7 +4,12 @@
 // rename one.
 // -----------------------------------------------------------------------------
 
-export const VERSION = '0.1.0';
+import { readFileSync } from 'node:fs';
+
+/** The version of the package (the release bumps it): the User-Agent follows. */
+export const VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
 /** Honest User-Agent, in the name of the integration (never a browser's). */
 export const USER_AGENT = `gladys-attente-frontiere/${VERSION} (+https://github.com/LM1LC3N7/gladys-attente-frontiere)`;
 
