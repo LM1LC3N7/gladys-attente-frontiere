@@ -1278,3 +1278,230 @@ test('a device without a wait feature (an older structure) never gets a state fo
   assert.ok(sent.length >= 1);
   assert.ok(sent.every((st) => st.device_feature_external_id.endsWith(':status')));
 });
+
+// --- Review r2 -------------------------------------------------------------------------
+
+test('stop() before /data was read never writes the default state over the real one', async () => {
+  const store = createMemoryStore({ v: 1, lastAttemptAt: NOW - MINUTE, published: { x: 1 } });
+  const { app } = await setup({ store });
+  await app.stop();
+  await app.disconnected();
+  assert.equal(store.saves, 0);
+  assert.deepEqual(store.data, { v: 1, lastAttemptAt: NOW - MINUTE, published: { x: 1 } });
+});
+
+test('a NEWER reading refused by Gladys keeps the older mark and is sent at the next publication', async (t) => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock, { every: HOUR });
+  const { begin, create, gladys, wait, app, statesOf } = await live({ clock, world });
+  await begin();
+  await create('to-usa', '090101');
+  const fid = F('to-usa', '090101', 'passenger');
+  const status = F('to-usa', '090101', 'status');
+  assert.equal(statesOf(fid).length, 1);
+  const statuses = statesOf(status).length;
+  const original = gladys.publishStates.bind(gladys);
+  let refuse = true;
+  t.mock.method(gladys, 'publishStates', async (states) => {
+    if (refuse) throw new Error('429');
+    return original(states);
+  });
+  // The next hourly reading (newer), refused during its read.
+  await wait(HOUR);
+  assert.equal(statesOf(fid).length, 1);
+  const older = app.published.get(fid);
+  assert.ok(older !== undefined, 'the older mark is restored, not dropped');
+  refuse = false;
+  await wait(2 * MINUTE);
+  await app.publishValues();
+  assert.equal(statesOf(fid).length, 2, 'the refused newer reading is sent again');
+  assert.ok(app.published.get(fid) > older);
+  // The refused status text is sent again too.
+  assert.ok(statesOf(status).length > statuses);
+  assert.match(statesOf(status).at(-1).text, /^Ouvert, relevé du/);
+});
+
+test('nothing is published once stopped, even a publication already queued', async () => {
+  const { begin, create, gladys, app } = await live();
+  await begin();
+  await app.stop();
+  const before = gladys.fake.states.length;
+  await create('to-canada', 'peace-bridge');
+  await app.publishValues();
+  assert.equal(gladys.fake.states.length, before);
+});
+
+test('beyond the budget, every status text gets its turn too (fair rotation)', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock, { every: INTERVAL });
+  const ports = Array.from({ length: 300 }, (_, i) => String(100000 + i));
+  // No wait value (closed lanes); the status text changes at every read (its time).
+  world.cbp = () =>
+    ports.map((number) =>
+      cbpPort({
+        local: edt(clock.now()),
+        number,
+        passenger: 'Lanes Closed',
+        commercial: 'Lanes Closed',
+      }),
+    );
+  const { begin, gladys, wait } = await live({ clock, world });
+  await begin();
+  for (const id of ports) {
+    const device = gladys.fake.discoveredDevices.find((d) => d.external_id === D('to-usa', id));
+    gladys.devices.push(structuredClone(device));
+  }
+  await wait(3 * INTERVAL);
+  const fed = new Set(
+    gladys.fake.states
+      .filter((st) => st.text !== undefined)
+      .map((st) => st.device_feature_external_id),
+  );
+  assert.equal(fed.size, 300);
+});
+
+test('restart long after the last good read: not shown connected, waiting for the read', async () => {
+  const store = createMemoryStore();
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock);
+  const a = await live({ store, clock, world });
+  await a.begin();
+  await a.app.stop();
+  // The last read 50 min ago (interval 15): its success says nothing about now.
+  store.data.lastOk = { cbsa: NOW - 50 * MINUTE, cbp: NOW - 50 * MINUTE };
+  store.data.lastAttemptAt = NOW - 10 * MINUTE;
+  const b = await live({ store, clock, world });
+  await b.begin();
+  assert.equal(b.sources.count('cbsa'), 0);
+  assert.equal(b.gladys.fake.connectionStatus.connected, false);
+  assert.match(b.gladys.fake.connectionStatus.message.fr, /En attente de la première lecture/);
+});
+
+test('a /data that cannot be set aside and never answers never blocks the start nor the stop', async () => {
+  const never = () => new Promise(() => {});
+  const store = { load: async () => ({ ok: false, code: 'EIO' }), save: never, setAside: never };
+  const { app, gladys, wait, sources } = await setup({ store });
+  app.connected(() => gladys.getConfig());
+  await wait(0);
+  await wait(6 * SECOND);
+  assert.equal(sources.count('cbsa'), 1, 'started and read');
+  assert.equal(app.dataBlocked, true, 'never written');
+  const stopped = app.stop();
+  await wait(0);
+  await wait(10 * SECOND);
+  await stopped;
+});
+
+for (const [name, behind] of [
+  ['5 h', 5 * HOUR],
+  ['3 days', 72 * HOUR],
+]) {
+  test(`a CBP feed ${name} behind the server Date (a cache): nothing published, said stale`, async () => {
+    const clock = testClock({ start: NOW });
+    const world = liveWorld(clock);
+    world.cbp = () => [
+      cbpPort({ local: edt(NOW - behind), updated: edt(NOW - behind - 5 * MINUTE), passenger: 7 }),
+    ];
+    const { begin, create, statesOf, gladys } = await live({ clock, world });
+    await begin();
+    await create('to-usa', '090101');
+    assert.equal(statesOf(F('to-usa', '090101', 'passenger')).length, 0);
+    assert.equal(
+      gladys.fake.lastState(F('to-usa', '090101', 'status')),
+      'Source muette depuis plus de 2 h : rien publié',
+    );
+    assert.match(
+      gladys.fake.connectionStatus.message.fr,
+      /CBP \(vers les États-Unis\) : flux figé ou en retard/,
+    );
+  });
+}
+
+test('one CBP port frozen for days among fresh ones: that port publishes nothing, the others do', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock);
+  world.cbp = () => [
+    cbpPort({ local: edt(NOW), updated: edt(NOW - 5 * MINUTE), passenger: 7 }),
+    cbpPort({
+      number: '070801',
+      local: edt(NOW - 72 * HOUR),
+      updated: edt(NOW - 72 * HOUR - 5 * MINUTE),
+      passenger: 8,
+    }),
+  ];
+  const { begin, create, statesOf, gladys } = await live({ clock, world });
+  await begin();
+  await create('to-usa', '090101');
+  await create('to-usa', '070801');
+  assert.equal(statesOf(F('to-usa', '090101', 'passenger')).length, 1);
+  assert.equal(statesOf(F('to-usa', '070801', 'passenger')).length, 0);
+  assert.equal(
+    gladys.fake.lastState(F('to-usa', '070801', 'status')),
+    'Source muette depuis plus de 2 h : rien publié',
+  );
+});
+
+test('a status text refused by Gladys is sent again at the next publication', async (t) => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock, { every: HOUR });
+  const { begin, create, gladys, wait, app, statesOf } = await live({ clock, world });
+  await begin();
+  await create('to-usa', '090101');
+  const status = F('to-usa', '090101', 'status');
+  const shown = statesOf(status).length;
+  const original = gladys.publishStates.bind(gladys);
+  let refuseTexts = true;
+  t.mock.method(gladys, 'publishStates', async (states) => {
+    if (refuseTexts && states.some((st) => st.text !== undefined)) throw new Error('429');
+    return original(states);
+  });
+  // The next hourly reading: its value goes through, its new status text is refused.
+  await wait(HOUR);
+  assert.equal(statesOf(status).length, shown);
+  refuseTexts = false;
+  await wait(2 * MINUTE);
+  await app.publishValues();
+  assert.equal(statesOf(status).length, shown + 1);
+});
+
+test('a frozen feed of a port of unknown district (zone guessed from the Date): stale after 2 h', async () => {
+  const clock = testClock({ start: NOW });
+  const world = liveWorld(clock, { every: 10 * MINUTE });
+  const frozen = edt(NOW);
+  world.cbp = () => [cbpPort({ number: '990101', local: frozen, updated: frozen, passenger: 3 })];
+  const { begin, create, wait, gladys, statesOf } = await live({ clock, world });
+  await begin();
+  await create('to-usa', '990101');
+  assert.equal(statesOf(F('to-usa', '990101', 'passenger')).length, 1);
+  await wait(2 * HOUR + INTERVAL);
+  assert.equal(
+    gladys.fake.lastState(F('to-usa', '990101', 'status')),
+    'Source muette depuis plus de 2 h : rien publié',
+  );
+  assert.equal(statesOf(F('to-usa', '990101', 'passenger')).length, 1);
+});
+
+test('a /data load that fails (rejects) is unreadable, never an empty state', async () => {
+  const store = createMemoryStore({ lastAttemptAt: NOW });
+  store.load = async () => {
+    throw new Error('EIO');
+  };
+  const { app, begin } = await setup({ store });
+  await begin();
+  assert.equal(app.dataUnreadable, true);
+  assert.equal(store.asides, 1);
+});
+
+test('the zones guessed for a port of unknown district narrow as the reads go', async () => {
+  const start = Date.UTC(2026, 10, 1, 6, 32); // 01:32 EST in New York, 01:32 CDT in Chicago
+  const clock = testClock({ start });
+  const world = liveWorld(clock);
+  world.cbp = () => [
+    cbpPort({ number: '990101', local: localNaive('America/New_York', clock.now()), passenger: 3 }),
+  ];
+  const { begin, wait, app } = await live({ clock, world });
+  await begin();
+  assert.deepEqual(app.guessedZones.get('990101'), ['America/New_York', 'America/Chicago']);
+  await wait(HOUR); // 02:32 EST: Chicago is on CST (UTC-6) by then
+  assert.deepEqual(app.guessedZones.get('990101'), ['America/New_York']);
+});

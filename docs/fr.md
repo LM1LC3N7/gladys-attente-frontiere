@@ -82,6 +82,15 @@ Une voie que le passage n'a pas ne reçoit simplement jamais de valeur.
   pris pour un frais, au prix, une fois par an, d'un relevé frais de cette
   heure-là écarté. Une heure qui suit un relevé déjà publié pour la même voie
   est prise comme la seconde : le nouveau relevé est publié.
+- Un poste d'un district inconnu (aucun aujourd'hui : les 30 postes du flux
+  ont leur district) peut être dans plusieurs fuseaux au moment d'un
+  changement d'heure, en mars comme en novembre : le relevé le plus ancien
+  possible est retenu ; jamais de relevé périmé publié, quelques relevés frais
+  de ces heures-là écartés. Les fuseaux devinés sont gardés et affinés de
+  lecture en lecture.
+- Un poste dont l'heure s'écarte de plus de 2 heures de l'en-tête `Date` du
+  serveur (flux servi depuis un cache, poste figé) ne publie rien ; tout le
+  flux de même si son heure la plus récente est dans ce cas.
 - Gladys garde la dernière valeur publiée d'une fonction : quand une attente
   n'est plus connue, c'est la fonction **État** qui le dit, pas la valeur.
 
@@ -127,7 +136,7 @@ lue avec succès dans l'intervalle (gardé dans /data), sinon « En attente de l
 première lecture (dans N min) » ; les états des appareils restent ceux déjà
 affichés. Le message dit pour chaque
 source ce qui ne va pas : injoignable, pas de réponse à temps, pause après un
-429 ou un 5xx, format inattendu, flux figé ; et aussi un intervalle remplacé
+429 ou un 5xx, format inattendu, flux figé ou en retard ; et aussi un intervalle remplacé
 (hors 10-60 minutes), un /data illisible (mis de côté sous un autre nom) ou non
 inscriptible, des valeurs reportées à la lecture suivante (Gladys accepte 300
 états par minute, le module en envoie 250 au plus sur une minute glissante ;

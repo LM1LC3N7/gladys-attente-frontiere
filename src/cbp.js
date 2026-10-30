@@ -122,10 +122,13 @@ export function parseLane(lane) {
  * @param {object} port a port of parseCbp
  * @param {number} ref the server `Date` (or our clock)
  * @param {(key: string) => number | undefined} last the UTC stamp last published for a lane
+ * @param {string[]} [guessed] the zones guessed earlier for a port of unknown district
  */
-export function resolvePort(port, ref, last = () => undefined) {
+export function resolvePort(port, ref, last = () => undefined, guessed = undefined) {
   const known = zoneOfPort(port.id);
-  const zones = known ? [known] : inferZones(port.portTime, ref);
+  // An unknown district: the zones guessed the first time are kept (a frozen
+  // feed would otherwise be read in another zone as hours go by).
+  const zones = known ? [known] : guessed?.length ? guessed : inferZones(port.portTime, ref);
   const zone = zones[0];
   const lanes = {};
   let feedUtc;
@@ -161,7 +164,14 @@ export function resolvePort(port, ref, last = () => undefined) {
     reading.age = Math.max(0, feedUtc - stamp);
     reading.naive = localNaive(zone, stamp);
   }
-  return { ...port, zone: known ?? (zones.length === 1 ? zone : undefined), zones, feedUtc, lanes };
+  return {
+    ...port,
+    known: Boolean(known),
+    zone: known ?? (zones.length === 1 ? zone : undefined),
+    zones,
+    feedUtc,
+    lanes,
+  };
 }
 
 /**

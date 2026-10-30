@@ -79,6 +79,14 @@ A lane the crossing does not have simply never gets a value.
   once a year, of a fresh reading of that hour left out. A time that follows a
   reading already published for the same lane is taken as the second: the new
   reading is published.
+- A port of an unknown district (none today: the 30 ports of the feed have
+  their district) may be in several zones around a change of time, in March
+  as in November: the oldest possible reading is kept; never a stale reading
+  published, a few fresh readings of those hours left out. The zones guessed
+  are kept and narrowed read after read.
+- A port whose time is more than 2 hours from the server `Date` header (a
+  feed served from a cache, a frozen port) publishes nothing; so does the
+  whole feed when its latest time is.
 - Gladys keeps the last value published of a feature: when a wait is no longer
   known, the **Status** feature says it, not the value.
 
@@ -121,7 +129,7 @@ the next read: "connected" when a source was read fine within the interval
 (kept in /data), else "Waiting for the first read (in N min)"; the device
 statuses stay as already shown. The message says, per source, what is
 wrong: unreachable, no answer in time, paused after a 429 or a 5xx, unexpected
-format, frozen feed; and also an interval replaced (out of 10-60 minutes), a
+format, frozen or late feed; and also an interval replaced (out of 10-60 minutes), a
 /data unreadable (set aside under another name) or not writable, values put
 off to the next read (Gladys accepts 300 states a minute, the module sends 250
 at most over a rolling minute; beyond, the values put off come first the next

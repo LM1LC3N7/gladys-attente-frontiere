@@ -31,6 +31,7 @@
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { FormatError, frenchNames, parseCbsaEnglish, parseCbsaFrench } from './cbsa.js';
 import { parseCbp, resolvePort } from './cbp.js';
+import { inferZones, zoneOfPort } from './zones.js';
 import { normalizeConfig } from './config.js';
 import {
   CATALOG_KEEP,
@@ -203,6 +204,8 @@ export class BorderApp {
     /** Fair rotation of the states put off by the budget. */
     this.cursor = { values: 0, texts: 0 };
     this.publishRun = Promise.resolve();
+    /** The zones guessed for the CBP ports of unknown district, kept for the session. */
+    this.guessedZones = new Map();
     this.discoveryKey = undefined;
   }
 
@@ -242,7 +245,7 @@ export class BorderApp {
     this.lastAttemptAt = finite(kept.lastAttemptAt) ? Math.min(kept.lastAttemptAt, at) : undefined;
     this.lastReadMono =
       this.lastAttemptAt === undefined ? undefined : mono - (at - this.lastAttemptAt);
-    // The time of the CBP feed (UTC) and when it last moved (a frozen feed is stale).
+    // The latest local time of the CBP feed and when it last moved (a frozen feed is stale).
     const feed = kept.cbpFeed;
     this.cbpFeed =
       feed && finite(feed.time) && finite(feed.changedAt)
@@ -374,11 +377,25 @@ export class BorderApp {
     if (gen !== this.run) return;
     if (this.dataUnreadable && this.dataBlocked) {
       // Never overwritten: kept under another name, then a fresh file.
-      try {
-        await this.store.setAside(this.now());
+      // Bounded like a save: a /data that never answers never holds the start
+      // back (nor the stop queued behind it); it is then never written.
+      let timer;
+      const aside = await Promise.race([
+        Promise.resolve()
+          .then(() => this.store.setAside(this.now()))
+          .then(
+            () => true,
+            () => false,
+          ),
+        new Promise((resolve) => {
+          timer = this.timers.setTimeout(() => resolve(false), SAVE_WAIT);
+        }),
+      ]);
+      this.timers.clearTimeout(timer);
+      if (aside) {
         this.dataBlocked = false;
         this.logger.warn('/data could not be read: the file was set aside');
-      } catch {
+      } else {
         this.logger.error('/data could not be read nor set aside: nothing is written to it');
       }
       if (gen !== this.run) return;
@@ -584,15 +601,44 @@ export class BorderApp {
         // November is told apart with the reading last published for it.
         const resolved = ports.map((port) => {
           const ids = idsOf(this.gladys, 'us', port.id);
-          return resolvePort(port, ref, (key) => this.published.get(ids.feature(key)));
+          // A port of unknown district: the zones guessed earlier narrow the
+          // new guess; a guess that no longer matches at all (a frozen feed)
+          // keeps the earlier one.
+          let guessed;
+          if (!zoneOfPort(port.id)) {
+            const before = this.guessedZones.get(port.id) ?? [];
+            const now = inferZones(port.portTime, ref);
+            const both = before.filter((z) => now.includes(z));
+            guessed = before.length === 0 ? now : both.length > 0 ? both : before;
+            if (guessed.length > 0) this.guessedZones.set(port.id, guessed);
+          }
+          const one = resolvePort(
+            port,
+            ref,
+            (key) => this.published.get(ids.feature(key)),
+            guessed,
+          );
+          // How far the time of the port is from the server Date (a cache, a frozen port).
+          return { ...one, behind: one.feedUtc === undefined ? undefined : ref - one.feedUtc };
         });
+        // The freeze detector follows the local times as written in the feed
+        // (a guessed zone could make a frozen time look as if it moved); the
+        // lag against the server Date uses the latest UTC instant.
         let feedTime;
+        let latestUtc;
         for (const port of resolved) {
-          if (port.feedUtc !== undefined && (feedTime === undefined || port.feedUtc > feedTime)) {
-            feedTime = port.feedUtc;
+          if (port.portTime !== undefined && (feedTime === undefined || port.portTime > feedTime)) {
+            feedTime = port.portTime;
+          }
+          if (port.feedUtc !== undefined && (latestUtc === undefined || port.feedUtc > latestUtc)) {
+            latestUtc = port.feedUtc;
           }
         }
-        this.cbp = { ports: new Map(resolved.map((port) => [port.id, port])), at };
+        this.cbp = {
+          ports: new Map(resolved.map((port) => [port.id, port])),
+          at,
+          behind: latestUtc === undefined ? undefined : ref - latestUtc,
+        };
         // A feed time that moves forward is a living feed; the same (or older) one is not.
         if (feedTime !== undefined && (!this.cbpFeed || feedTime > this.cbpFeed.time)) {
           this.cbpFeed = { time: feedTime, changedAt: wall, changedMono: at };
@@ -634,7 +680,12 @@ export class BorderApp {
 
   /** Whether the CBP feed no longer moves (its time unchanged for over 2 h). */
   cbpStale(mono) {
-    return !this.cbpFeed || mono - this.cbpFeed.changedMono > MAX_AGE;
+    return (
+      !this.cbpFeed ||
+      mono - this.cbpFeed.changedMono > MAX_AGE ||
+      // A feed whose latest time is more than 2 h from the server Date (served from a cache).
+      (this.cbp?.behind !== undefined && Math.abs(this.cbp.behind) > MAX_AGE)
+    );
   }
 
   /**
@@ -669,6 +720,10 @@ export class BorderApp {
     const port = this.cbp.ports.get(id);
     if (!port) return { values, status: { code: 'missing' } };
     if (this.cbpStale(mono)) return { values, status: { code: 'source_stale' } };
+    // One port whose own time is more than 2 h from the server Date: frozen there.
+    if (port.behind !== undefined && Math.abs(port.behind) > MAX_AGE) {
+      return { values, status: { code: 'source_stale' } };
+    }
     const grown = mono - this.cbp.at;
     for (const key of WAIT_KEYS.us) {
       const lane = port.lanes[key];

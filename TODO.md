@@ -52,8 +52,11 @@
   CBP's from the feed time of the port (both in UTC with the port's zone),
   plus the time since the read (monotonic). The CBP zone abbreviation is never used (typed by hand, wrong
   at times: "EST" in October at Port Huron).
-- A CBP feed whose latest port time (UTC) does not move forward for over
-  2 hours is stale (time and date of its last move in /data).
+- A CBP feed whose latest local port time does not move forward for over
+  2 hours is stale (time and date of its last move in /data; local times so
+  that a guessed zone cannot make a frozen feed look alive). The zones guessed
+  for a port of unknown district are kept for the session and narrowed read
+  after read; a guess that no longer matches keeps the earlier one (review r2).
 - Pace: interval 10 to 60 min (default 15), one read at a time, the next one
   armed before anything is awaited; /data saves awaited 5 s at most.
 - 429/5xx: pause per source, 5 min doubled, `Retry-After` honoured, 60 s to
@@ -92,7 +95,17 @@
 - Kept as it is (review r1, m6): a restart with /data unreadable or not
   writable reads at once (documented).
 - Equivalent mutants: the 60 s floor of a pause (the base is 5 min, review r1
-  P2).
+  P2); review r2: Q5 (the rollback of a refused batch skips a mark changed
+  meanwhile: only a device deleted or created can change it, and both clear
+  it again), Q15 (the budget left is never negative: every batch is counted
+  before it is sent, within the budget), U1 (an undated lane has no age),
+  F7 and a freeze detector on UTC times (the per-port lag against the server
+  Date catches the same feeds), ST2/ST3/A2 (the bounded read gives the same
+  result), ZN13, ZN14, RP9, Q3.
+- CBP feed or port more than 2 h from the server `Date` (review r2, m3):
+  stale, nothing published (a cache, a frozen port).
+- setAside of an unreadable /data raced against 5 s (review r2, m2): a /data
+  that never answers is never written, the start goes on.
 
 ## Later
 

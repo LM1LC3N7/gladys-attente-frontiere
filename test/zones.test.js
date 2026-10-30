@@ -16,7 +16,7 @@ import {
   offsetAt,
   zoneOfPort,
 } from '../src/zones.js';
-import { HOUR, MINUTE, atText, cbpPort } from './helpers/app.js';
+import { HOUR, MINUTE, atText, cbpPort, fixture } from './helpers/app.js';
 
 const N = (y, mo, d, h, mi = 0, s = 0) => Date.UTC(y, mo - 1, d, h, mi, s);
 
@@ -188,4 +188,50 @@ test('an unknown district during a change of time: every matching zone, the most
   assert.deepEqual(p.zones, ['America/New_York', 'America/Chicago']);
   assert.equal(p.zone, undefined);
   assert.equal(p.lanes.passenger.stamp, N(2026, 11, 1, 4, 45), '00:45 EDT, the earliest reading');
+});
+
+test('every port of the real capture gets its zone from its district', () => {
+  const zones = Object.fromEntries(
+    parseCbp(fixture('cbp-bwtnew.json')).ports.map((p) => [p.id, zoneOfPort(p.id)]),
+  );
+  const east = [
+    '010401',
+    '010601',
+    '011501',
+    '011502',
+    '011503',
+    '020901',
+    '021101',
+    '021201',
+    '070101',
+    '070401',
+    '070801',
+    '071201',
+    '090101',
+    '090102',
+    '090103',
+    '090104',
+    'L01901',
+  ];
+  for (const id of east) assert.equal(zones[id], 'America/New_York', id);
+  for (const id of ['380001', '380002', '380102', '380201', '380301'])
+    assert.equal(zones[id], 'America/Detroit', id);
+  for (const id of ['300401', '300402', '300403', '300901', '302301'])
+    assert.equal(zones[id], 'America/Los_Angeles', id);
+  assert.equal(zones['331001'], 'America/Denver');
+  assert.equal(zones['340101'], 'America/Chicago');
+  assert.equal(zones['360401'], 'America/Chicago');
+  assert.equal(Object.keys(zones).length, 30);
+  // Idaho's ports of the Great Falls district are on Pacific time: Eastport and Porthill.
+  assert.equal(zoneOfPort('330201'), 'America/Los_Angeles');
+  assert.equal(zoneOfPort('330801'), 'America/Los_Angeles');
+  assert.equal(zoneOfPort('331801'), 'America/Denver', 'Roosville, Montana');
+});
+
+test('a lane a little ahead of its port (within 30 min) is 0 min old, never younger', () => {
+  const p = resolvePort(
+    port(N(2026, 10, 29, 17, 2), N(2026, 10, 29, 17, 20)),
+    N(2026, 10, 29, 21, 3),
+  );
+  assert.equal(p.lanes.passenger.age, 0);
 });

@@ -124,8 +124,8 @@ export function problemText(source, problem, now = 0) {
     encoding: { en: 'text is not UTF-8', fr: 'texte illisible (pas en UTF-8)' },
     format: { en: 'unexpected format', fr: 'format inattendu' },
     stale: {
-      en: 'feed frozen for over 2 h, nothing published',
-      fr: 'flux figé depuis plus de 2 h, rien publié',
+      en: 'feed frozen or late by over 2 h, nothing published',
+      fr: 'flux figé ou en retard de plus de 2 h, rien publié',
     },
   };
   const what = texts[problem.code] ?? { en: 'read failed', fr: 'lecture en échec' };
